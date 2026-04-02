@@ -1,4 +1,4 @@
-"""Tests for PolarQuant.
+"""Tests for polar-embed.
 
 Covers: correctness, theoretical bounds, retrieval quality,
 edge cases, and distribution robustness.
@@ -6,9 +6,9 @@ edge cases, and distribution robustness.
 
 import numpy as np
 import pytest
-from polarquant import PolarQuantizer, CompressedVectors, lloyd_max_codebook
-from polarquant.rotation import haar_rotation
-from polarquant.codebook import theoretical_mse, theoretical_lower_bound
+from polar_embed import PolarQuantizer, CompressedVectors, lloyd_max_codebook
+from polar_embed.rotation import haar_rotation
+from polar_embed.codebook import theoretical_mse, theoretical_lower_bound
 
 
 # ── Fixtures ──
@@ -149,12 +149,7 @@ class TestDistortion:
 
     @pytest.mark.parametrize("bits", [2, 3, 4])
     def test_mse_below_upper_bound(self, unit_vectors, bits):
-        """Empirical MSE should be within 2x of theoretical upper bound.
-
-        The theoretical bound (Theorem 1) is asymptotically tight for large d.
-        At d=256, the Gaussian approximation to the Beta distribution introduces
-        a constant factor gap. We verify we're within 2x.
-        """
+        """Empirical MSE should be within 2x of theoretical upper bound."""
         pq = PolarQuantizer(256, bits=bits)
         empirical = pq.mse(unit_vectors)
         upper = theoretical_mse(256, bits)
@@ -168,7 +163,7 @@ class TestDistortion:
         pq = PolarQuantizer(256, bits=bits)
         empirical = pq.mse(unit_vectors)
         lower = theoretical_lower_bound(bits)
-        assert empirical > lower * 0.5, (  # generous tolerance
+        assert empirical > lower * 0.5, (
             f"{bits}-bit: empirical MSE {empirical:.6f} < lower bound {lower:.6f}"
         )
 
@@ -216,11 +211,11 @@ class TestRetrieval:
         )
 
     def test_beats_naive_at_3bit(self, unit_vectors, queries):
-        """PolarQuant should beat naive minmax quantization at 3 bits."""
+        """polar-embed should beat naive minmax quantization at 3 bits."""
         d = 256
         bits = 3
 
-        # PolarQuant
+        # polar-embed
         pq = PolarQuantizer(d, bits=bits)
         comp = pq.encode(unit_vectors)
         X_hat_pq = pq.decode(comp)
@@ -240,7 +235,7 @@ class TestRetrieval:
             recall_naive.append(recall_at_k(true_ips[:, qi], X_hat_naive @ queries[qi]))
 
         assert np.mean(recall_pq) > np.mean(recall_naive), (
-            f"PolarQuant recall {np.mean(recall_pq):.3f} <= "
+            f"polar-embed recall {np.mean(recall_pq):.3f} <= "
             f"naive recall {np.mean(recall_naive):.3f}"
         )
 
@@ -263,9 +258,6 @@ class TestSerialization:
     def test_compression_ratio(self, unit_vectors):
         pq = PolarQuantizer(256, bits=4)
         comp = pq.encode(unit_vectors)
-        # uint8 indices (1 byte/coord) + float32 norms (4 bytes/vec)
-        # vs float32 (4 bytes/coord)
-        # ratio should be approximately 4x
         assert comp.compression_ratio > 3.5
         assert comp.compression_ratio < 4.5
 
@@ -279,19 +271,17 @@ class TestDistributions:
         """Embeddings where some dimensions have much higher variance."""
         d = 256
         scales = np.ones(d, dtype=np.float32)
-        scales[:10] = 10.0  # 10 outlier dimensions
+        scales[:10] = 10.0
         X = rng.standard_normal((5000, d)).astype(np.float32) * scales
         X /= np.linalg.norm(X, axis=1, keepdims=True)
 
         pq = PolarQuantizer(d, bits=4)
         mse_aniso = pq.mse(X)
 
-        # Should still work — rotation spreads the anisotropy
         X_iso = rng.standard_normal((5000, d)).astype(np.float32)
         X_iso /= np.linalg.norm(X_iso, axis=1, keepdims=True)
         mse_iso = pq.mse(X_iso)
 
-        # Anisotropic MSE should be within 2x of isotropic
         assert mse_aniso < mse_iso * 2.0, (
             f"Anisotropic MSE {mse_aniso:.6f} >> isotropic {mse_iso:.6f}"
         )
@@ -303,7 +293,6 @@ class TestDistributions:
         centers = rng.standard_normal((n_clusters, d)).astype(np.float32)
         centers /= np.linalg.norm(centers, axis=1, keepdims=True)
 
-        # Generate points around cluster centers
         labels = rng.integers(0, n_clusters, size=5000)
         X = centers[labels] + rng.standard_normal((5000, d)).astype(np.float32) * 0.1
         X /= np.linalg.norm(X, axis=1, keepdims=True)
@@ -312,8 +301,7 @@ class TestDistributions:
         comp = pq.encode(X)
         X_hat = pq.decode(comp)
 
-        # Check that cluster structure is preserved
-        Q = centers[:5]  # use cluster centers as queries
+        Q = centers[:5]
         true_ips = X @ Q.T
         est_ips = X_hat @ Q.T
 

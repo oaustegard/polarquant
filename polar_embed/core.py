@@ -1,9 +1,9 @@
-"""Core PolarQuant encoder/decoder."""
+"""Core polar-embed encoder/decoder."""
 
 import numpy as np
 from typing import Tuple
-from polarquant.codebook import lloyd_max_codebook
-from polarquant.rotation import haar_rotation
+from polar_embed.codebook import lloyd_max_codebook
+from polar_embed.rotation import haar_rotation
 
 
 class CompressedVectors:
