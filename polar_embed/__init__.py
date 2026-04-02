@@ -12,6 +12,11 @@ coarse-to-fine retrieval from a single encoded representation.
 
 from polar_embed.core import PolarQuantizer, CompressedVectors
 from polar_embed.codebook import lloyd_max_codebook, nested_codebooks
+from polar_embed.packing import pack, unpack, packed_nbytes
 
-__version__ = "0.3.0"
-__all__ = ["PolarQuantizer", "CompressedVectors", "lloyd_max_codebook", "nested_codebooks"]
+__version__ = "0.4.0"
+__all__ = [
+    "PolarQuantizer", "CompressedVectors",
+    "lloyd_max_codebook", "nested_codebooks",
+    "pack", "unpack", "packed_nbytes",
+]

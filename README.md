@@ -7,7 +7,7 @@ Based on the rotation + Lloyd-Max insight from [TurboQuant](https://arxiv.org/ab
 ## Quick start
 
 ```python
-from polarquant import PolarQuantizer
+from polar_embed import PolarQuantizer
 
 # Data-oblivious: no training data needed
 pq = PolarQuantizer(d=384, bits=4)
