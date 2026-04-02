@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "polarquant"
-version = "0.1.0"
-description = "Data-oblivious vector quantization for embedding compression"
+name = "polar-embed"
+version = "0.2.0"
+description = "Retrieval-validated embedding compression. 4-8x smaller vectors, proven recall."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
