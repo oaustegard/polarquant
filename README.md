@@ -1,8 +1,8 @@
-# PolarQuant
+# polar-embed
 
-Data-oblivious vector quantization for embedding compression. Compress embedding indices to 3-4 bits per dimension with strong retrieval recall and zero calibration.
+Retrieval-validated embedding compression. Compress your vectors 4-8x with proven recall.
 
-Based on the rotation + Lloyd-Max insight from [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., ICLR 2026).
+Based on the rotation + Lloyd-Max insight from [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., ICLR 2026), focused exclusively on the use case that matters most: **embedding storage and retrieval**.
 
 ## How it works
 
@@ -14,7 +14,7 @@ The result: near-optimal MSE distortion within a ~2.7x constant factor of the in
 ## Usage
 
 ```python
-from polarquant import PolarQuantizer
+from polar_embed import PolarQuantizer
 
 # Initialize (precomputes rotation matrix + codebook)
 pq = PolarQuantizer(d=768, bits=4)
@@ -32,17 +32,26 @@ reconstructed = pq.decode(compressed)  # (n, 768) float32
 compressed.save("index.npz")
 ```
 
-## Why not the full TurboQuant?
+## Why polar-embed instead of full TurboQuant?
 
-TurboQuant adds a QJL (Quantized Johnson-Lindenstrauss) residual correction that makes inner product estimates provably unbiased. Our experiments show this matters for KV cache attention (where softmax amplifies bias) but **hurts** retrieval recall — the extra noise from QJL dequantization outweighs the debiasing benefit when only ranking matters.
+TurboQuant adds a QJL (Quantized Johnson-Lindenstrauss) residual correction that makes inner product estimates provably unbiased. This matters for KV cache attention (where softmax amplifies bias) but **hurts** retrieval recall — the extra noise from QJL dequantization outweighs the debiasing benefit when only ranking matters.
 
 At 4-bit, d=256:
 
 | Method | Recall@10 |
 |---|---|
-| PolarQuant (rotation + Lloyd-Max) | **0.86** |
+| polar-embed (rotation + Lloyd-Max) | **0.86** |
 | TurboQuant Prod (LM + QJL) | 0.68 |
 | Naive minmax | 0.78 |
+
+## Why not the other PolarQuant/TurboQuant implementations?
+
+There are 20+ repos implementing TurboQuant for KV cache compression. polar-embed is different:
+
+- **Embedding-first** — optimized for vector storage and nearest-neighbor retrieval, not LLM inference
+- **Retrieval-validated** — benchmarked on recall@k, not just MSE or perplexity
+- **Zero calibration** — data-oblivious design means no training data or fitting step required
+- **Practitioners over researchers** — pip install, compress, search. No CUDA kernels or custom hardware needed.
 
 ## Install
 
