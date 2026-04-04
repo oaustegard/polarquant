@@ -14,13 +14,13 @@ Formerly known as polar-embed.
 
 import warnings
 
-from remex.core import Quantizer, CompressedVectors
+from remex.core import Quantizer, CompressedVectors, PackedVectors
 from remex.codebook import lloyd_max_codebook, nested_codebooks
 from remex.packing import pack, unpack, packed_nbytes
 
 __version__ = "0.5.0"
 __all__ = [
-    "Quantizer", "CompressedVectors",
+    "Quantizer", "CompressedVectors", "PackedVectors",
     "PolarQuantizer",  # deprecated alias
     "lloyd_max_codebook", "nested_codebooks",
     "pack", "unpack", "packed_nbytes",

@@ -1,7 +1,7 @@
 """Core remex encoder/decoder with Matryoshka bit precision."""
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Iterable
 from remex.codebook import lloyd_max_codebook, nested_codebooks
 from remex.packing import pack, unpack, packed_nbytes
 from remex.rotation import haar_rotation
@@ -89,6 +89,354 @@ class CompressedVectors:
             indices = data["indices"]
 
         return cls(indices, data["norms"], d, bits)
+
+    def save_arrow(self, path: str, seed: Optional[int] = None, **extra_metadata):
+        """Save to Arrow IPC (Feather v2) format, packing indices for storage.
+
+        Requires pyarrow (optional dependency).
+
+        Args:
+            path: Output file path.
+            seed: Quantizer seed to store in schema metadata.
+            **extra_metadata: Additional key-value pairs for schema metadata.
+        """
+        packed = PackedVectors.from_compressed(self)
+        packed.save_arrow(path, seed=seed, **extra_metadata)
+
+    @classmethod
+    def load_arrow(cls, path: str) -> "CompressedVectors":
+        """Load from Arrow IPC (Feather v2) format, unpacking to uint8 indices.
+
+        Args:
+            path: Arrow IPC file path.
+
+        Returns:
+            CompressedVectors with unpacked uint8 indices.
+        """
+        packed = PackedVectors.load_arrow(path)
+        return packed.to_compressed()
+
+
+class PackedVectors:
+    """Memory-efficient packed storage for quantized vectors.
+
+    Stores indices bit-packed in memory, unpacking rows on demand.
+    Uses 2-4x less RAM than CompressedVectors for sub-byte bit widths.
+
+    Use ``from_compressed()`` to convert from CompressedVectors,
+    ``from_rows()`` to reconstruct from database rows, or
+    ``load()`` / ``load_arrow()`` to read from disk.
+
+    Search is supported via ``Quantizer.search_adc()`` and
+    ``Quantizer.search_twostage()``.  Cached ``search()`` is not
+    supported — use ``to_compressed()`` to convert back if needed.
+    """
+
+    __slots__ = ("_packed", "norms", "d", "bits", "n", "_row_bytes", "_row_aligned")
+
+    def __init__(
+        self,
+        packed: np.ndarray,
+        norms: np.ndarray,
+        n: int,
+        d: int,
+        bits: int,
+    ):
+        """
+        Args:
+            packed: (n, row_bytes) uint8 array of bit-packed indices.
+            norms: (n,) float32 array of vector norms.
+            n: Number of vectors.
+            d: Vector dimension.
+            bits: Bits per coordinate.
+        """
+        self._packed = packed  # (n, row_bytes) uint8
+        self.norms = norms
+        self.n = n
+        self.d = d
+        self.bits = bits
+        self._row_bytes = packed_nbytes(1, d, bits)
+        self._row_aligned = (d * bits) % 8 == 0
+
+    def unpack_rows(self, start: int, end: int) -> np.ndarray:
+        """Decompress a contiguous row slice to uint8 indices.
+
+        Args:
+            start: First row index (inclusive).
+            end: Last row index (exclusive).
+
+        Returns:
+            (end - start, d) uint8 array of indices.
+        """
+        n_rows = end - start
+        if self._row_aligned:
+            flat = self._packed[start:end].ravel()
+            return unpack(flat, self.bits, n_rows * self.d).reshape(n_rows, self.d)
+        else:
+            result = np.empty((n_rows, self.d), dtype=np.uint8)
+            for i in range(n_rows):
+                result[i] = unpack(self._packed[start + i], self.bits, self.d)
+            return result
+
+    def unpack_at(self, idx: np.ndarray) -> np.ndarray:
+        """Decompress arbitrary row indices to uint8 indices.
+
+        Args:
+            idx: Array of row indices to unpack.
+
+        Returns:
+            (len(idx), d) uint8 array of indices.
+        """
+        idx = np.asarray(idx)
+        if idx.ndim == 0:
+            idx = idx.reshape(1)
+        rows = self._packed[idx]  # (len(idx), row_bytes)
+        if self._row_aligned:
+            flat = rows.ravel()
+            return unpack(flat, self.bits, len(idx) * self.d).reshape(len(idx), self.d)
+        else:
+            result = np.empty((len(idx), self.d), dtype=np.uint8)
+            for i in range(len(idx)):
+                result[i] = unpack(rows[i], self.bits, self.d)
+            return result
+
+    @classmethod
+    def from_compressed(cls, compressed: CompressedVectors) -> "PackedVectors":
+        """Convert a CompressedVectors to packed in-memory format.
+
+        Args:
+            compressed: CompressedVectors with unpacked uint8 indices.
+
+        Returns:
+            PackedVectors with bit-packed indices.
+        """
+        n, d, bits = compressed.n, compressed.d, compressed.bits
+        row_bytes = packed_nbytes(1, d, bits)
+        row_aligned = (d * bits) % 8 == 0
+        if row_aligned:
+            packed_flat = pack(compressed.indices.ravel(), bits)
+            packed = packed_flat.reshape(n, row_bytes)
+        else:
+            packed = np.empty((n, row_bytes), dtype=np.uint8)
+            for i in range(n):
+                packed[i] = pack(compressed.indices[i], bits)
+        return cls(packed, compressed.norms.copy(), n, d, bits)
+
+    @classmethod
+    def from_rows(
+        cls,
+        rows: Iterable,
+        norms: np.ndarray,
+        d: int,
+        bits: int,
+    ) -> "PackedVectors":
+        """Reconstruct from database packed byte rows.
+
+        Args:
+            rows: Iterable of bytes/bytearray/ndarray, one per vector.
+            norms: (n,) float32 array of vector norms.
+            d: Vector dimension.
+            bits: Bits per coordinate.
+
+        Returns:
+            PackedVectors instance.
+        """
+        row_list = []
+        for r in rows:
+            if isinstance(r, (bytes, bytearray)):
+                row_list.append(np.frombuffer(r, dtype=np.uint8))
+            else:
+                row_list.append(np.asarray(r, dtype=np.uint8))
+        packed = np.stack(row_list)
+        n = len(row_list)
+        return cls(packed, np.asarray(norms, dtype=np.float32), n, d, bits)
+
+    def at_precision(self, target_bits: int) -> "PackedVectors":
+        """Derive a lower-bit representation via Matryoshka right-shift.
+
+        Unpacks in chunks, right-shifts, and repacks at target_bits.
+
+        Args:
+            target_bits: Target bit precision (1 to self.bits).
+
+        Returns:
+            New PackedVectors at the target precision.
+        """
+        if target_bits < 1 or target_bits > self.bits:
+            raise ValueError(
+                f"target_bits must be 1-{self.bits}, got {target_bits}"
+            )
+        if target_bits == self.bits:
+            return self
+
+        shift = self.bits - target_bits
+        row_bytes_target = packed_nbytes(1, self.d, target_bits)
+        target_aligned = (self.d * target_bits) % 8 == 0
+        packed_target = np.empty((self.n, row_bytes_target), dtype=np.uint8)
+
+        chunk = 4096
+        for start in range(0, self.n, chunk):
+            end = min(start + chunk, self.n)
+            indices = self.unpack_rows(start, end)
+            shifted = (indices >> shift).astype(np.uint8)
+            if target_aligned:
+                packed_flat = pack(shifted.ravel(), target_bits)
+                packed_target[start:end] = packed_flat.reshape(
+                    end - start, row_bytes_target
+                )
+            else:
+                for i in range(end - start):
+                    packed_target[start + i] = pack(shifted[i], target_bits)
+
+        return PackedVectors(
+            packed_target, self.norms.copy(), self.n, self.d, target_bits
+        )
+
+    def to_compressed(self) -> CompressedVectors:
+        """Convert to CompressedVectors by unpacking all indices."""
+        indices = self.unpack_rows(0, self.n)
+        return CompressedVectors(indices, self.norms.copy(), self.d, self.bits)
+
+    def subset(self, idx: np.ndarray) -> "PackedVectors":
+        """Return a PackedVectors containing only the given row indices."""
+        idx = np.asarray(idx)
+        return PackedVectors(
+            self._packed[idx].copy(),
+            self.norms[idx].copy(),
+            len(idx),
+            self.d,
+            self.bits,
+        )
+
+    @property
+    def nbytes(self) -> int:
+        """Packed memory footprint in bytes."""
+        return self._packed.nbytes + self.norms.nbytes
+
+    @property
+    def resident_bytes(self) -> int:
+        """Actual RAM footprint (same as nbytes — no caches)."""
+        return self._packed.nbytes + self.norms.nbytes
+
+    @property
+    def compression_ratio(self) -> float:
+        """Ratio vs float32 storage."""
+        return (self.n * self.d * 4) / self.nbytes
+
+    def save(self, path: str):
+        """Save to compressed .npz file."""
+        np.savez_compressed(
+            path,
+            packed_indices=self._packed.ravel(),
+            norms=self.norms,
+            d=np.int32(self.d),
+            bits=np.int32(self.bits),
+            n=np.int32(self.n),
+        )
+
+    @classmethod
+    def load(cls, path: str) -> "PackedVectors":
+        """Load from .npz file, keeping indices packed."""
+        data = np.load(path)
+        d = int(data["d"])
+        bits = int(data["bits"])
+        n = int(data["n"])
+        row_bytes = packed_nbytes(1, d, bits)
+        packed_flat = data["packed_indices"]
+        packed = packed_flat.reshape(n, row_bytes)
+        return cls(packed, data["norms"], n, d, bits)
+
+    def save_arrow(self, path: str, seed: Optional[int] = None, **extra_metadata):
+        """Save to Arrow IPC (Feather v2) format.
+
+        Stores packed indices as FixedSizeBinary and norms as Float32,
+        with quantizer parameters in schema-level metadata.
+
+        Requires pyarrow (optional dependency).
+
+        Args:
+            path: Output file path.
+            seed: Quantizer seed to store in metadata.
+            **extra_metadata: Additional key-value pairs for schema metadata.
+        """
+        try:
+            import pyarrow as pa
+            import pyarrow.feather as feather
+        except ImportError:
+            raise ImportError(
+                "pyarrow is required for Arrow IPC format: "
+                "pip install pyarrow"
+            )
+
+        row_bytes = self._row_bytes
+        metadata = {
+            b"d": str(self.d).encode(),
+            b"bits": str(self.bits).encode(),
+            b"n": str(self.n).encode(),
+        }
+        if seed is not None:
+            metadata[b"seed"] = str(seed).encode()
+        for k, v in extra_metadata.items():
+            key = k.encode() if isinstance(k, str) else k
+            metadata[key] = str(v).encode()
+
+        schema = pa.schema(
+            [
+                pa.field("norms", pa.float32()),
+                pa.field("packed_indices", pa.binary(row_bytes)),
+            ],
+            metadata=metadata,
+        )
+
+        # Build arrays from flat buffers for efficiency
+        norms_arr = pa.array(self.norms.tolist(), type=pa.float32())
+        packed_buf = pa.py_buffer(self._packed.tobytes())
+        packed_arr = pa.FixedSizeBinaryArray.from_buffers(
+            pa.binary(row_bytes), self.n, [None, packed_buf]
+        )
+
+        table = pa.table(
+            {"norms": norms_arr, "packed_indices": packed_arr}, schema=schema
+        )
+        feather.write_feather(table, path)
+
+    @classmethod
+    def load_arrow(cls, path: str, memory_map: bool = False) -> "PackedVectors":
+        """Load from Arrow IPC (Feather v2) format.
+
+        Args:
+            path: Arrow IPC file path.
+            memory_map: If True, memory-map the file for zero-copy access.
+
+        Returns:
+            PackedVectors with packed indices.
+        """
+        try:
+            import pyarrow.feather as feather
+        except ImportError:
+            raise ImportError(
+                "pyarrow is required for Arrow IPC format: "
+                "pip install pyarrow"
+            )
+
+        table = feather.read_table(path, memory_map=memory_map)
+        metadata = table.schema.metadata
+        d = int(metadata[b"d"])
+        bits = int(metadata[b"bits"])
+        n = int(metadata[b"n"])
+        row_bytes = packed_nbytes(1, d, bits)
+
+        norms = table.column("norms").to_numpy().astype(np.float32)
+
+        # Extract packed data from contiguous Arrow buffer
+        packed_col = table.column("packed_indices")
+        chunk = packed_col.chunk(0)
+        buffers = chunk.buffers()
+        data_buf = buffers[1]
+        packed_flat = np.frombuffer(data_buf, dtype=np.uint8)[: n * row_bytes]
+        packed = packed_flat.reshape(n, row_bytes).copy()
+
+        return cls(packed, norms, n, d, bits)
 
 
 class Quantizer:
@@ -189,7 +537,7 @@ class Quantizer:
         Caches the dequantized rotated representation for subsequent queries.
 
         Args:
-            compressed: Encoded corpus.
+            compressed: Encoded corpus (CompressedVectors only).
             query: (d,) query vector.
             k: Number of results.
             precision: Bit precision for search (1 to self.bits).
@@ -199,7 +547,17 @@ class Quantizer:
 
         Returns:
             (indices, scores): top-k corpus indices and approximate scores.
+
+        Raises:
+            TypeError: If passed a PackedVectors (use search_adc or
+                search_twostage instead, or convert with to_compressed()).
         """
+        if isinstance(compressed, PackedVectors):
+            raise TypeError(
+                "PackedVectors does not support cached search(). "
+                "Use search_adc() or search_twostage(), or convert "
+                "with packed.to_compressed() first."
+            )
         query = np.asarray(query, dtype=np.float32)
         q_rot = self.R @ query
 
@@ -215,7 +573,7 @@ class Quantizer:
 
     def search_adc(
         self,
-        compressed: CompressedVectors,
+        compressed,
         query: np.ndarray,
         k: int = 10,
         precision: Optional[int] = None,
@@ -232,8 +590,11 @@ class Quantizer:
         uses dramatically less RAM. Ideal for the coarse stage of
         two-stage retrieval, or when memory is constrained.
 
+        Accepts both CompressedVectors and PackedVectors. When given
+        PackedVectors, indices are unpacked on demand per chunk.
+
         Args:
-            compressed: Encoded corpus.
+            compressed: Encoded corpus (CompressedVectors or PackedVectors).
             query: (d,) query vector.
             k: Number of results.
             precision: Bit precision (1 to self.bits). None = full.
@@ -246,16 +607,18 @@ class Quantizer:
         q_rot = self.R @ query
 
         centroids = self._resolve_centroids(compressed, precision)
-        indices = self._resolve_indices(compressed, precision)
-
-        # Build ADC lookup table: table[j, i] = centroid_i * q_rot_j
-        # centroids are (n_levels,), same for all dims
         table = np.outer(q_rot, centroids).astype(np.float32)
-        # table shape: (d, n_levels)
 
-        scores = self._adc_score_chunked(
-            table, indices, compressed.norms, chunk_size
-        )
+        if isinstance(compressed, PackedVectors):
+            shift = 0 if (precision is None or precision == self.bits) else (self.bits - precision)
+            scores = self._adc_score_packed(
+                table, compressed, shift, chunk_size
+            )
+        else:
+            indices = self._resolve_indices(compressed, precision)
+            scores = self._adc_score_chunked(
+                table, indices, compressed.norms, chunk_size
+            )
 
         if k >= compressed.n:
             topk_idx = np.argsort(-scores)
@@ -266,7 +629,7 @@ class Quantizer:
 
     def search_twostage(
         self,
-        compressed: CompressedVectors,
+        compressed,
         query: np.ndarray,
         k: int = 10,
         candidates: int = 500,
@@ -283,12 +646,16 @@ class Quantizer:
         Stage 2 (fine): Dequantize only the candidate vectors at full
         precision, then rerank by exact (quantized) inner product.
 
+        Accepts both CompressedVectors and PackedVectors. When given
+        PackedVectors, indices are unpacked on demand per chunk (coarse)
+        and only for the candidate rows (fine).
+
         Memory profile at 100k vectors, d=384:
           - Single-stage search():    154 MB  (cached n*d float32)
           - Two-stage search_twostage: ~39 MB  (uint8 indices + 6 MB temp)
 
         Args:
-            compressed: Encoded corpus.
+            compressed: Encoded corpus (CompressedVectors or PackedVectors).
             query: (d,) query vector.
             k: Final number of results.
             candidates: Number of coarse candidates (stage 1).
@@ -306,16 +673,22 @@ class Quantizer:
         query = np.asarray(query, dtype=np.float32)
         q_rot = self.R @ query
         coarse_k = min(candidates, compressed.n)
+        is_packed = isinstance(compressed, PackedVectors)
 
         # Stage 1: ADC coarse scan — no float32 cache needed
         coarse_centroids = self._resolve_centroids(compressed, coarse_precision)
-        coarse_indices = self._resolve_indices(compressed, coarse_precision)
-
         coarse_table = np.outer(q_rot, coarse_centroids).astype(np.float32)
 
-        coarse_scores = self._adc_score_chunked(
-            coarse_table, coarse_indices, compressed.norms, coarse_chunk_size
-        )
+        if is_packed:
+            coarse_shift = self.bits - coarse_precision
+            coarse_scores = self._adc_score_packed(
+                coarse_table, compressed, coarse_shift, coarse_chunk_size
+            )
+        else:
+            coarse_indices = self._resolve_indices(compressed, coarse_precision)
+            coarse_scores = self._adc_score_chunked(
+                coarse_table, coarse_indices, compressed.norms, coarse_chunk_size
+            )
 
         if coarse_k >= compressed.n:
             coarse_idx = np.argsort(-coarse_scores)
@@ -324,7 +697,10 @@ class Quantizer:
 
         # Stage 2: full-precision rerank on small candidate set
         fine_centroids = self._resolve_centroids(compressed, None)
-        fine_indices = compressed.indices[coarse_idx]
+        if is_packed:
+            fine_indices = compressed.unpack_at(coarse_idx)
+        else:
+            fine_indices = compressed.indices[coarse_idx]
 
         X_hat_cand = fine_centroids[fine_indices]  # (candidates, d)
 
@@ -379,6 +755,39 @@ class Quantizer:
             # Then sum over d → (chunk,) inner-product contribution
             chunk_scores = table[dim_idx, chunk_idx].sum(axis=1)
             scores[start:end] = chunk_scores * norms[start:end]
+
+        return scores
+
+    @staticmethod
+    def _adc_score_packed(
+        table: np.ndarray,
+        packed: "PackedVectors",
+        shift: int,
+        chunk_size: int,
+    ) -> np.ndarray:
+        """Score packed vectors via ADC, unpacking chunks on demand.
+
+        Args:
+            table: (d, n_levels) float32 lookup table.
+            packed: PackedVectors with bit-packed indices.
+            shift: Right-shift to apply for precision reduction (0 = full).
+            chunk_size: Rows per chunk (controls peak memory).
+
+        Returns:
+            (n,) float32 approximate inner-product scores.
+        """
+        n = packed.n
+        d = table.shape[0]
+        dim_idx = np.arange(d)
+        scores = np.empty(n, dtype=np.float32)
+
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            chunk_idx = packed.unpack_rows(start, end)  # (chunk, d) uint8
+            if shift > 0:
+                chunk_idx = chunk_idx >> shift
+            chunk_scores = table[dim_idx, chunk_idx].sum(axis=1)
+            scores[start:end] = chunk_scores * packed.norms[start:end]
 
         return scores
 
