@@ -5,3 +5,5 @@ dist/
 build/
 .pytest_cache/
 *.npz
+bench/.specter2_cache/
+bench/plots/
