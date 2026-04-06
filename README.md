@@ -28,17 +28,17 @@ The quantizer is fully determined by `(d, bits, seed)` — no training, no fitti
 
 Three steps, each with a clear purpose:
 
-1. **Random rotation** — A fixed orthogonal matrix (Haar-distributed via QR decomposition) transforms any embedding distribution so that coordinates become approximately i.i.d. N(0, 1/d). This is the key insight from TurboQuant: it makes quantization **data-oblivious**, meaning no training data is required.
+1. **Random rotation** — A fixed orthogonal matrix ([Haar-distributed](https://arxiv.org/abs/math-ph/0609050) via QR decomposition) transforms any embedding distribution so that coordinates become approximately i.i.d. N(0, 1/d). This is the key insight from TurboQuant: it makes quantization **data-oblivious**, meaning no training data is required.
 
-2. **Lloyd-Max scalar quantization** — Each coordinate is independently quantized using optimal boundaries for the N(0, 1/d) distribution. The codebook is computed from the theoretical Gaussian CDF, not from data. This produces the minimum mean-squared-error scalar quantizer for Gaussian inputs.
+2. **[Lloyd-Max](https://en.wikipedia.org/wiki/Lloyd%27s_algorithm) scalar quantization** — Each coordinate is independently quantized using optimal boundaries for the N(0, 1/d) distribution. The codebook is computed from the theoretical Gaussian CDF, not from data. This produces the minimum mean-squared-error scalar quantizer for Gaussian inputs.
 
 3. **Bit-packing** — Indices are stored at their actual bit width (not wasteful uint8), giving honest compression ratios. A 4-bit codebook uses 4 bits per coordinate on disk.
 
 Norms are stored separately as float32, preserving inner-product ranking up to quantization error.
 
-**Why not QJL?** TurboQuant includes a QJL (quantized Johnson-Lindenstrauss) residual correction stage for unbiased inner product estimation. We omit it because QJL adds variance that hurts retrieval — when only ranking order matters (not absolute scores), the MSE-optimal rotation + Lloyd-Max stage empirically dominates.
+**Why not QJL?** TurboQuant includes a QJL (quantized [Johnson-Lindenstrauss](https://en.wikipedia.org/wiki/Johnson%E2%80%93Lindenstrauss_lemma)) residual correction stage for unbiased inner product estimation. We omit it because QJL adds variance that hurts retrieval — when only ranking order matters (not absolute scores), the MSE-optimal rotation + Lloyd-Max stage empirically dominates.
 
-## Matryoshka bit precision
+## [Matryoshka](https://arxiv.org/abs/2205.13147) bit precision
 
 An n-bit quantized index's top k bits are a valid k-bit code. remex exploits this: **encode once at full bit-width, search at any lower precision** by right-shifting indices. Centroid tables are precomputed for all bit levels.
 
@@ -48,7 +48,8 @@ This enables two-stage coarse-to-fine retrieval from a single encoded representa
 pq = Quantizer(d=384, bits=8)
 compressed = pq.encode(corpus)
 
-# Two-stage: coarse ADC scan at reduced bits, then full-precision rerank
+# Two-stage: coarse ADC (Asymmetric Distance Computation) scan at reduced bits,
+# then full-precision rerank
 indices, scores = pq.search_twostage(
     compressed, query, k=10,
     candidates=200,          # coarse pass returns 200 candidates
@@ -153,7 +154,7 @@ Main quantizer class (formerly `PolarQuantizer`, which remains available as a de
 
 **`search_batch(compressed, queries, k=10, precision=None)`** — Batch version of `search()` using matrix multiplication for better throughput. Returns `(indices, scores)` where both are `(n_queries, k)`.
 
-**`search_adc(compressed, query, k=10, precision=None, chunk_size=4096)`** — Memory-efficient search via lookup-table scoring. No float32 cache — peak memory is `chunk_size * d * 4` bytes (~6 MB). Slower per-query but uses ~5x less RAM. Returns `(indices, scores)`.
+**`search_adc(compressed, query, k=10, precision=None, chunk_size=4096)`** — Memory-efficient search via [ADC (Asymmetric Distance Computation)](https://ieeexplore.ieee.org/document/5432202/) lookup-table scoring. No float32 cache — peak memory is `chunk_size * d * 4` bytes (~6 MB). Slower per-query but uses ~5x less RAM. Returns `(indices, scores)`.
 
 **`search_twostage(compressed, query, k=10, candidates=500, coarse_precision=None)`** — Two-stage Matryoshka retrieval: ADC coarse scan (no cache) then full-precision rerank on candidates only. Memory-efficient: only the small candidate set is dequantized. Returns `(indices, scores)`.
 
@@ -239,9 +240,9 @@ from remex import lloyd_max_codebook, nested_codebooks
 
 ## vs TurboQuant
 
-TurboQuant (Zandieh et al., ICLR 2026) adds QJL (quantized Johnson-Lindenstrauss) residual correction for unbiased inner product estimates. This is important for KV cache attention, where unbiased estimation matters. For **retrieval** (ranking by approximate inner product), the QJL variance hurts more than the debiasing helps. remex implements only the MSE-optimal rotation + Lloyd-Max stage, which empirically dominates for nearest-neighbor search.
+TurboQuant (Zandieh et al., ICLR 2026) adds QJL (quantized [Johnson-Lindenstrauss](https://en.wikipedia.org/wiki/Johnson%E2%80%93Lindenstrauss_lemma)) residual correction for unbiased inner product estimates. This is important for KV cache attention, where unbiased estimation matters. For **retrieval** (ranking by approximate inner product), the QJL variance hurts more than the debiasing helps. remex implements only the MSE-optimal rotation + Lloyd-Max stage, which empirically dominates for nearest-neighbor search.
 
-## vs FAISS Product Quantization
+## vs [FAISS Product Quantization](https://ieeexplore.ieee.org/document/5432202/)
 
 | | remex | FAISS PQ |
 |---|---|---|
@@ -284,6 +285,10 @@ pytest tests/test_packed_vectors.py -v  # PackedVectors tests
 ## References
 
 - Zandieh et al. (2025). *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.* ICLR 2026. [arXiv:2504.19874](https://arxiv.org/abs/2504.19874)
+- Jégou, Douze & Schmid (2011). *Product Quantization for Nearest Neighbor Search.* IEEE TPAMI 33(1):117–128. [IEEE Xplore](https://ieeexplore.ieee.org/document/5432202/) — introduces Product Quantization, ADC (Asymmetric Distance Computation), and SDC for approximate nearest neighbor search.
+- Kusupati et al. (2022). *Matryoshka Representation Learning.* NeurIPS 2022. [arXiv:2205.13147](https://arxiv.org/abs/2205.13147) — the nested/coarse-to-fine representation idea that inspires remex's bit-level nesting.
+- Mezzadri (2007). *How to Generate Random Matrices from the Classical Compact Groups.* Notices of the AMS 54(5):592–604. [arXiv:math-ph/0609050](https://arxiv.org/abs/math-ph/0609050) — the QR-of-Gaussian method for Haar-distributed orthogonal matrices used in `remex/rotation.py`.
+- Lloyd (1982). *Least Squares Quantization in PCM.* IEEE Trans. Information Theory 28(2):129–137. [IEEE Xplore](https://ieeexplore.ieee.org/document/1056489) — optimal scalar quantization (Lloyd-Max algorithm) for minimum MSE.
 
 ## License
 
