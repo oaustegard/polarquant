@@ -22,3 +22,8 @@ include = ["remex*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[project.urls]
+Homepage = "https://github.com/oaustegard/remex"
+Repository = "https://github.com/oaustegard/remex"
+Issues = "https://github.com/oaustegard/remex/issues"
