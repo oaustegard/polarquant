@@ -104,6 +104,10 @@ Despite the 61% σ deviation, 4-bit R@10 > 0.83 and 8-bit is essentially lossles
 
 See [docs/specter2-case-study.md](../docs/specter2-case-study.md) for full analysis.
 
+## Research investigations
+
+- [docs/research/hybrid-precision-quantization.md](../docs/research/hybrid-precision-quantization.md) — Ported OjaKV&rsquo;s &ldquo;keep high-residual vectors at higher precision&rdquo; trick to TurboQuant-style scalar quantization. Verdict: FILE. Residual distribution is near-flat under Haar rotation + Lloyd-Max (top 10% of vectors carry only 10.8% of error mass), and cross-tier score merging is miscalibrated on anisotropic embeddings (e.g. SPECTER2). `search_twostage()` remains the right memory/recall trade-off.
+
 ## Memory Profiles (100k vectors, d=384, 8-bit)
 
 | Strategy | Resident RAM | ms/query |
