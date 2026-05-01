@@ -119,9 +119,14 @@ See `bench/RESULTS.md` (in this PR) for current numbers.
 
 ## Notes / known gaps
 
-- **Encode is currently scalar.** The hot loop is a straightforward
-  per-row matvec + searchsorted; SIMD vectorization (via Mojo's
-  `vectorize`) is the obvious next step.
+- **Encode hot loop is SIMD-vectorized.** The per-row rotation matvec
+  and the squared-norm reduction in `encode_batch` (and the q_rot
+  matvec in `adc_search`) use a `simd_width_of[DType.float32]()`-wide
+  FMA + horizontal reduce — see `_dot_f32` and `_sumsq_f32` in
+  `src/quantizer.mojo`. On AVX-512 this brings Mojo encode from 179
+  µs/vec to 21 µs/vec at d=384 (8.6x speedup), within 1.3x of NumPy's
+  BLAS `X @ R.T`. Closing the remaining gap would mean tiling /
+  blocking the matvec or batching multiple rows per call.
 - **No Matryoshka / no `search_twostage`.** Out of scope for issue #5.
 - **No GPU.** The `coding-mojo` skill notes Claude.ai containers are
   CPU-only; GPU work needs to be tested on a different host.
