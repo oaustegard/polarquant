@@ -143,18 +143,21 @@ encode` produces a `.pq` byte-identical to Python's
 
 Wall-clock (n=10k, d=384, bits=4, queries=50, k=10, container CPU):
 
-| Stage           | NumPy    | Mojo (this PR) | Mojo / NumPy |
-|-----------------|---------:|---------------:|-------------:|
-| encode (µs/vec) |    52.3  |          222.5 |        4.3x slower |
-| ADC search (ms/q) |  21.1  |            3.8 |        5.5x faster |
+| Stage           | NumPy    | Mojo (initial port) | Mojo (SIMD) | Mojo (SIMD) / NumPy |
+|-----------------|---------:|--------------------:|------------:|--------------------:|
+| encode (µs/vec) |    16.0  |              179.4  |       20.9  |       1.30x slower  |
+| ADC search (ms/q) |  22.8  |                4.9  |        4.9  |       4.6x faster   |
 
-Mojo ADC search wins because the gather-heavy inner loop is
-straight-line scalar code that LLVM optimizes well, while the
-equivalent NumPy is bottlenecked on `np.outer` and chunk-wise
-gathers. Mojo encode loses to NumPy because NumPy's `X @ R.T` calls
-into BLAS (vendor SIMD), while the Mojo port currently uses a
-naive scalar matvec — vectorizing it via `std.algorithm.vectorize`
-is the obvious follow-up.
+The initial Mojo port encode used a naive scalar matvec (`for k:
+for j: s += R[k,j] * X[j]`) and was 4.3x slower than NumPy's
+BLAS-backed `X @ R.T`. Replacing the inner loop with a
+`simd_width_of[DType.float32]()`-wide FMA + horizontal reduce
+(see `_dot_f32` in `src/quantizer.mojo`) closed the gap to 1.3x
+— an **8.6x speedup on the Mojo encode kernel itself**. ADC
+search continues to win because its gather-heavy inner loop is
+straight-line scalar code that LLVM auto-vectorizes well, while
+the equivalent NumPy is bottlenecked on `np.outer` and chunk-wise
+gathers.
 
 Reproduce:
 

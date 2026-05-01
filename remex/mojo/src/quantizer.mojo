@@ -8,10 +8,54 @@ the rotated query and the codebook centroids.
 
 from std.math import sqrt
 from std.memory import alloc, UnsafePointer
+from std.sys.info import simd_width_of
 from src.codebook import Codebook, lloyd_max_codebook
 from src.matrix import Matrix
 from src.rotation import haar_rotation
 from src.packing import pack, packed_nbytes
+
+
+alias _W = simd_width_of[DType.float32]()
+
+
+fn _dot_f32(a: UnsafePointer[Float32, MutExternalOrigin],
+            b: UnsafePointer[Float32, MutExternalOrigin],
+            n: Int) -> Float32:
+    """SIMD-vectorized dot product of two contiguous Float32 buffers.
+
+    A single `_W`-wide FMA accumulator covers the body; the tail (n % _W)
+    runs scalar. For d == _W (e.g. d=16 on AVX-512 with W=16), this is
+    exactly one load + one FMA + one horizontal reduce — same shape as
+    a BLAS sdot kernel, so reduction order matches what NumPy produces
+    on most CPUs.
+    """
+    var acc = SIMD[DType.float32, _W](0)
+    var i = 0
+    while i + _W <= n:
+        var av = a.load[width=_W](i)
+        var bv = b.load[width=_W](i)
+        acc = av.fma(bv, acc)
+        i += _W
+    var s: Float32 = acc.reduce_add()
+    while i < n:
+        s += a[i] * b[i]
+        i += 1
+    return s
+
+
+fn _sumsq_f32(a: UnsafePointer[Float32, MutExternalOrigin], n: Int) -> Float32:
+    """SIMD-vectorized sum of squares: sum_i a[i] * a[i]."""
+    var acc = SIMD[DType.float32, _W](0)
+    var i = 0
+    while i + _W <= n:
+        var av = a.load[width=_W](i)
+        acc = av.fma(av, acc)
+        i += _W
+    var s: Float32 = acc.reduce_add()
+    while i < n:
+        s += a[i] * a[i]
+        i += 1
+    return s
 
 
 def _searchsorted(boundaries: UnsafePointer[Float32, MutExternalOrigin],
@@ -69,22 +113,14 @@ def encode_batch(q: Quantizer,
     var rotated = alloc[Float32](d)
     for i in range(n):
         var base = i * d
-        var nm: Float32 = Float32(0.0)
-        for j in range(d):
-            var v: Float32 = X[base + j]
-            nm += v * v
-        nm = sqrt(nm)
+        var nm = sqrt(_sumsq_f32(X + base, d))
         norms_out[i] = nm
         var inv = Float32(1.0) / nm if nm > Float32(1e-8) else Float32(1.0 / 1e-8)
 
-        # Rotate: rotated[k] = sum_j R[k, j] * (X[i, j] / nm)
-        # Inlined to avoid an extra normalized buffer.
+        # Rotate: rotated[k] = (sum_j R[k, j] * X[i, j]) / nm.
+        # Each row of R and X[i, :] is contiguous — SIMD dot per output coord.
         for k in range(d):
-            var s: Float32 = Float32(0.0)
-            var rrow = k * d
-            for j in range(d):
-                s += q.R.data[rrow + j] * X[base + j]
-            rotated[k] = s * inv
+            rotated[k] = _dot_f32(q.R.data + k * d, X + base, d) * inv
 
         # Searchsorted per coordinate
         for k in range(d):
@@ -108,14 +144,10 @@ def adc_search(q: Quantizer,
     var d = q.d
     var n_levels = q.cb.n_levels
 
-    # q_rot = R @ query
+    # q_rot = R @ query (SIMD dot per output coord)
     var q_rot = alloc[Float32](d)
     for i in range(d):
-        var s: Float32 = Float32(0.0)
-        var rrow = i * d
-        for j in range(d):
-            s += q.R.data[rrow + j] * query[j]
-        q_rot[i] = s
+        q_rot[i] = _dot_f32(q.R.data + i * d, query, d)
 
     # table[j, c] = q_rot[j] * centroid[c]
     var table = alloc[Float32](d * n_levels)
