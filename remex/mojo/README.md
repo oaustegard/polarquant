@@ -1,16 +1,18 @@
 # remex Mojo port (`polarquant`)
 
-A pure-Mojo port of the remex Quantizer's encode + ADC search path,
-shipped as a standalone CLI binary.
+A pure-Mojo port of the remex Quantizer's encode + ADC search +
+decode path, shipped as a standalone CLI binary.
 
-Closes [issue #5](https://github.com/oaustegard/remex/issues/5).
+Closes [issue #5](https://github.com/oaustegard/remex/issues/5),
+[issue #38](https://github.com/oaustegard/remex/issues/38), and
+[issue #39](https://github.com/oaustegard/remex/issues/39).
 
 ## What's here
 
 ```
 remex/mojo/
 ├── README.md                # This file
-├── polarquant.mojo          # CLI entrypoint (encode + search)
+├── polarquant.mojo          # CLI entrypoint (encode + search + decode)
 ├── src/
 │   ├── mathx.mojo           # erf-based normal CDF / PDF
 │   ├── rng.mojo             # xoshiro256++ + Marsaglia polar normal
@@ -18,16 +20,19 @@ remex/mojo/
 │   ├── rotation.mojo        # Householder QR → Haar orthogonal matrix
 │   ├── codebook.mojo        # Lloyd-Max iteration on N(0, 1/d) + Matryoshka nested tables
 │   ├── packing.mojo         # 1/2/3/4/8-bit pack and unpack
-│   ├── npy.mojo             # .npy reader (float32, 2D, C-contiguous)
+│   ├── packed_vectors.mojo  # Bit-packed in-memory storage with on-demand unpack
+│   ├── npy.mojo             # .npy reader/writer (float32, 2D, C-contiguous)
 │   ├── pq_format.mojo       # .pq binary format read/write
 │   ├── params_format.mojo   # .params dump (R + boundaries + centroids)
-│   └── quantizer.mojo       # Quantizer struct: encode + ADC search + two-stage search
+│   └── quantizer.mojo       # Quantizer struct: encode + ADC search + two-stage + decode
 ├── tests/
 │   ├── test_rng.mojo
 │   ├── test_rotation.mojo
 │   ├── test_codebook.mojo
 │   ├── test_packing.mojo
+│   ├── test_packed_vectors.mojo    # PackedVectors round-trip + at_precision parity
 │   ├── test_encode.mojo            # bit-identical encode parity vs Python
+│   ├── test_decode.mojo            # decode parity vs Python (full + coarse precision)
 │   └── test_search_twostage.mojo   # top-k parity for search_twostage vs Python
 └── bench/
     ├── bench_encode.mojo
@@ -68,6 +73,11 @@ mojo build -I . bench/bench_twostage.mojo  -o bench/bench_twostage
 # precision, full-precision rerank on the top `--candidates` rows.
 ./polarquant search corpus.pq query.npy --k 10 --seed 42 \
     --twostage --candidates 500 --coarse-precision 2
+
+# Reconstruct float32 vectors from a .pq → .npy. Optional --precision
+# uses the nested codebook at a coarser bit width (1..bits).
+./polarquant decode corpus.pq --params P.bin -o reconstructed.npy
+./polarquant decode corpus.pq --params P.bin --precision 2 -o coarse.npy
 ```
 
 The same `corpus.pq` round-trips through the Python library:
@@ -114,6 +124,51 @@ save_params('/tmp/_parity.params', q)
 save_pq('/tmp/_parity_ref.pq', q.encode(X))
 "
 mojo run -I . tests/test_encode.mojo
+
+# Decode parity (full precision + coarse via nested codebook):
+python -c "
+import numpy as np
+from remex import Quantizer, save_pq, save_params
+
+np.random.seed(0)
+n, d, bits = 80, 16, 4
+coarse_precision = 2
+
+X = np.random.randn(n, d).astype(np.float32)
+q = Quantizer(d=d, bits=bits, seed=42)
+save_params('/tmp/_decode.params', q)
+cv = q.encode(X)
+save_pq('/tmp/_decode.pq', cv)
+
+np.save('/tmp/_decode_X.npy', X)
+np.save('/tmp/_decode_full.npy', q.decode(cv).astype(np.float32))
+np.save('/tmp/_decode_coarse.npy',
+        q.decode(cv, precision=coarse_precision).astype(np.float32))
+np.save('/tmp/_decode_meta.npy',
+        np.array([[coarse_precision]], dtype=np.float32))
+"
+mojo run -I . tests/test_decode.mojo
+
+# PackedVectors round-trip + at_precision parity:
+python -c "
+import numpy as np
+from remex import Quantizer, PackedVectors
+
+np.random.seed(0)
+n, d, bits = 80, 16, 4
+target_bits = 2
+
+X = np.random.randn(n, d).astype(np.float32)
+q = Quantizer(d=d, bits=bits, seed=42)
+cv = q.encode(X)
+packed = PackedVectors.from_compressed(cv)
+np.save('/tmp/_pv_indices.npy', cv.indices.astype(np.float32))
+np.save('/tmp/_pv_indices_at.npy',
+        packed.at_precision(target_bits).unpack_rows(0, n).astype(np.float32))
+np.save('/tmp/_pv_meta.npy',
+        np.array([[n, d, bits, target_bits]], dtype=np.float32))
+"
+mojo run -I . tests/test_packed_vectors.mojo
 
 # search_twostage parity (also requires Python remex installed):
 python -c "

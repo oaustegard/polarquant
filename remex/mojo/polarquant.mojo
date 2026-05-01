@@ -17,10 +17,10 @@ from std.sys import argv
 from std.memory import alloc, UnsafePointer
 from src.codebook import Codebook, NestedCodebook, lloyd_max_codebook, nested_codebooks_from
 from src.matrix import Matrix
-from src.npy import load_npy_2d_f32
+from src.npy import load_npy_2d_f32, save_npy_2d_f32
 from src.params_format import load_params
 from src.pq_format import save_pq, load_pq
-from src.quantizer import Quantizer, encode_batch, adc_search, search_twostage
+from src.quantizer import Quantizer, encode_batch, adc_search, search_twostage, decode_batch
 from src.packing import pack, packed_nbytes
 from src.rotation import haar_rotation
 
@@ -55,6 +55,7 @@ def _print_usage():
     print("  polarquant encode <input.npy> --bits N (--seed S | --params P) -o <out.pq>")
     print("  polarquant search <index.pq> <query.npy> --k K (--seed S | --params P) [--top T]")
     print("                   [--twostage --candidates N --coarse-precision K]")
+    print("  polarquant decode <index.pq> (--seed S | --params P) [--precision P] -o <out.npy>")
 
 
 def cmd_encode(args: List[String]) raises:
@@ -209,6 +210,72 @@ def cmd_search(args: List[String]) raises:
     top_scores.free()
 
 
+def cmd_decode(args: List[String]) raises:
+    """Decode subcommand: load .pq, reconstruct float32 vectors, write .npy.
+
+    End-to-end reconstruction parity with `Quantizer.decode` from the
+    Python library: same params + same .pq + same `--precision` produce
+    a float32 (n, d) array matching to within 1e-5 max abs diff.
+    """
+    if len(args) < 2:
+        _print_usage()
+        raise Error("decode: missing index.pq")
+    var index_path = args[1]
+
+    var seed_idx = _arg_idx(args, String("--seed"))
+    var params_idx = _arg_idx(args, String("--params"))
+    if seed_idx < 0 and params_idx < 0:
+        raise Error("decode: provide --seed or --params")
+    var seed: UInt64 = UInt64(42)
+    if seed_idx >= 0:
+        seed = UInt64(Int(_arg_str(args, seed_idx + 1)))
+    var params_path = String("")
+    if params_idx >= 0:
+        params_path = _arg_str(args, params_idx + 1)
+
+    var prec_idx = _arg_idx(args, String("--precision"))
+    var precision = 0  # 0 means full precision
+    if prec_idx >= 0:
+        precision = Int(_arg_str(args, prec_idx + 1))
+
+    var out_idx = _arg_idx(args, String("-o"))
+    if out_idx < 0:
+        raise Error("decode: -o <out.npy> required")
+    var out_path = _arg_str(args, out_idx + 1)
+
+    var pq = load_pq(index_path)
+    print("decode:", index_path, "→", out_path,
+          "(n =", pq.n, ", d =", pq.d, ", bits =", pq.bits,
+          ", precision =", precision if precision > 0 else pq.bits, ")")
+
+    var q_quant = _build_quantizer(pq.d, pq.bits, seed, params_path)
+
+    # Build nested centroid tables from the loaded codebook so they match
+    # what Python would compute for the same Quantizer (mirrors the
+    # search_twostage path).
+    var nested = nested_codebooks_from(q_quant.cb, pq.d)
+
+    # Unpack indices into uint8 (n*d). Copy norms into a fresh buffer too
+    # (UnsafePointer field aliasing workaround — see test_encode.mojo).
+    from src.packing import unpack
+    var indices = alloc[UInt8](pq.n * pq.d)
+    unpack(pq.packed_indices, pq.n * pq.d, pq.bits, indices)
+    var norms_local = alloc[Float32](pq.n)
+    for i in range(pq.n):
+        norms_local[i] = pq.norms[i]
+
+    var X_hat = alloc[Float32](pq.n * pq.d)
+    decode_batch(q_quant, nested, indices, norms_local, pq.n,
+                 precision, X_hat)
+
+    save_npy_2d_f32(out_path, X_hat, pq.n, pq.d)
+    print("  wrote", pq.n * pq.d * 4, "float32 bytes")
+
+    indices.free()
+    norms_local.free()
+    X_hat.free()
+
+
 def main() raises:
     var args = argv()
     if len(args) < 2:
@@ -223,6 +290,8 @@ def main() raises:
         cmd_encode(sub_args)
     elif cmd == "search":
         cmd_search(sub_args)
+    elif cmd == "decode":
+        cmd_decode(sub_args)
     else:
         _print_usage()
         raise Error(String("unknown subcommand: ") + cmd)
