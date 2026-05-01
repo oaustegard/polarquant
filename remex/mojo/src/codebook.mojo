@@ -112,7 +112,7 @@ struct NestedCodebook(Movable):
     var offsets: InlineArray[Int, 10]
     var max_bits: Int
 
-    def __init__(out self, max_bits: Int):
+    def __init__(out self, max_bits: Int) raises:
         if max_bits < 1 or max_bits > NESTED_MAX_BITS:
             raise Error("nested codebook: max_bits must be 1..8")
         self.max_bits = max_bits
@@ -140,7 +140,7 @@ struct NestedCodebook(Movable):
         self.centroids.free()
 
 
-def nested_codebooks_from(cb: Codebook, d: Int) -> NestedCodebook:
+def nested_codebooks_from(cb: Codebook, d: Int) raises -> NestedCodebook:
     """Build nested centroid tables from an already-computed max-bits codebook.
 
     The Gaussian distribution is successively refinable: the top `b` bits of
@@ -205,7 +205,7 @@ def nested_codebooks_from(cb: Codebook, d: Int) -> NestedCodebook:
     return nested^
 
 
-def nested_codebooks(d: Int, max_bits: Int) -> NestedCodebook:
+def nested_codebooks(d: Int, max_bits: Int) raises -> NestedCodebook:
     """Build a Lloyd-Max codebook for `(d, max_bits)` and return its nested tables.
 
     Convenience wrapper around `lloyd_max_codebook` + `nested_codebooks_from`.

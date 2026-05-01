@@ -186,3 +186,71 @@ def load_npy_2d_f32(path: String) raises -> Npy2D:
     for i in range(n * 4):
         bp[i] = raw[data_offset + i]
     return out^
+
+
+def _int_to_str(v: Int) -> String:
+    """Convert a non-negative integer to its decimal ASCII string."""
+    if v == 0:
+        return String("0")
+    var digits = String("")
+    var x = v
+    while x > 0:
+        var d = x % 10
+        digits = chr(Int(ord("0")) + d) + digits
+        x = x // 10
+    return digits
+
+
+def save_npy_2d_f32(path: String,
+                    data: UnsafePointer[Float32, MutExternalOrigin],
+                    rows: Int, cols: Int) raises:
+    """Write a 2D float32 C-contiguous .npy file (v1.0 format).
+
+    The header is padded with spaces so that `(magic + version + len + header)`
+    is a multiple of 64 bytes — matches `np.save`'s alignment convention,
+    so NumPy can read what we write.
+    """
+    # Build header dict in NumPy's exact format. The trailing space + newline
+    # before the closing brace mimics np.save's header.
+    var header_core = (
+        String("{'descr': '<f4', 'fortran_order': False, 'shape': (")
+        + _int_to_str(rows) + String(", ") + _int_to_str(cols) + String("), }")
+    )
+    # Pad with spaces so total preamble + header_len is a multiple of 64.
+    # Final header byte must be '\n'.
+    var preamble = 10  # magic (6) + version (2) + header_len (2)
+    var min_total = preamble + len(header_core) + 1  # +1 for '\n'
+    var aligned_total = ((min_total + 63) // 64) * 64
+    var pad = aligned_total - min_total
+    var header_str = header_core
+    for _ in range(pad):
+        header_str += String(" ")
+    header_str += String("\n")
+    var header_len = len(header_str)
+    var data_offset = preamble + header_len
+
+    var n_floats = rows * cols
+    var total = data_offset + n_floats * 4
+    var buf = alloc[UInt8](total)
+    buf[0] = UInt8(0x93)
+    buf[1] = UInt8(ord("N"))
+    buf[2] = UInt8(ord("U"))
+    buf[3] = UInt8(ord("M"))
+    buf[4] = UInt8(ord("P"))
+    buf[5] = UInt8(ord("Y"))
+    buf[6] = UInt8(1)  # major
+    buf[7] = UInt8(0)  # minor
+    buf[8] = UInt8(header_len & 0xFF)
+    buf[9] = UInt8((header_len >> 8) & 0xFF)
+
+    var hbytes = header_str.as_bytes()
+    for i in range(header_len):
+        buf[preamble + i] = hbytes[i]
+
+    var src_bytes = data.bitcast[UInt8]()
+    for i in range(n_floats * 4):
+        buf[data_offset + i] = src_bytes[i]
+
+    var span = Span[UInt8, MutExternalOrigin](ptr=buf, length=total)
+    Path(path).write_bytes(span)
+    buf.free()

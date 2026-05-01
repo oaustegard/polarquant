@@ -191,6 +191,98 @@ def adc_search(q: Quantizer,
     q_rot.free()
 
 
+fn _accum_row_f32(dst: UnsafePointer[Float32, MutExternalOrigin],
+                  r_row: UnsafePointer[Float32, MutExternalOrigin],
+                  scale: Float32, n: Int):
+    """Fused multiply-add row accumulation: dst[j] += scale * r_row[j].
+
+    Used by `decode_batch` for the rotation matvec. Iterating with the
+    outer loop over k and an inner broadcast-FMA over j means R is
+    accessed sequentially row-by-row and `dst` is reused without a
+    transpose — same access pattern as the encode hot loop.
+    """
+    var bcast = SIMD[DType.float32, _W](scale)
+    var j = 0
+    while j + _W <= n:
+        var rv = r_row.load[width=_W](j)
+        var ov = dst.load[width=_W](j)
+        dst.store(j, bcast.fma(rv, ov))
+        j += _W
+    while j < n:
+        dst[j] += scale * r_row[j]
+        j += 1
+
+
+def decode_batch(q: Quantizer,
+                 nested: NestedCodebook,
+                 indices: UnsafePointer[UInt8, MutExternalOrigin],
+                 norms: UnsafePointer[Float32, MutExternalOrigin],
+                 n: Int,
+                 precision: Int,
+                 mut X_hat_out: UnsafePointer[Float32, MutExternalOrigin]) raises:
+    """Reconstruct float32 vectors from packed indices + norms.
+
+    Mirrors `Quantizer.decode` in `remex/core.py`. `precision == 0` (or
+    `precision == q.bits`) means full precision and uses the full-precision
+    centroid table from `q.cb`; lower precisions use the matching nested
+    table from `nested` and right-shift the indices by `q.bits - precision`.
+
+    Output layout: `X_hat_out` is a contiguous (n, d) float32 buffer.
+    For each row i, the formula is:
+
+        X_hat_rot[i, k] = centroids[indices[i, k] >> shift]
+        X_hat_unit[i, j] = sum_k X_hat_rot[i, k] * R[k, j]
+        X_hat[i, j]      = X_hat_unit[i, j] * norms[i]
+
+    `nested` may be unused when precision is full; pass any
+    `NestedCodebook` with `max_bits == q.bits` for that case (cheap to
+    build via `nested_codebooks_from(q.cb, d)`).
+    """
+    var d = q.d
+    var bits = q.bits
+    if precision < 0 or precision > bits:
+        raise Error("decode_batch: precision must be 0..bits")
+    if precision != 0 and precision != bits and nested.max_bits != bits:
+        raise Error("decode_batch: nested.max_bits must equal q.bits")
+
+    var use_full = (precision == 0 or precision == bits)
+    var shift = 0 if use_full else bits - precision
+
+    var centroids: UnsafePointer[Float32, MutExternalOrigin]
+    if use_full:
+        centroids = q.cb.centroids
+    else:
+        centroids = nested.get_table(precision)
+
+    # Per-row dequantized rotated vector. Keeping it as a single d-long
+    # scratch buffer avoids materializing the full (n, d) X_hat_rot matrix.
+    var xhrot = alloc[Float32](d)
+
+    for i in range(n):
+        var base = i * d
+        # Stage 1: lookup centroids per coordinate.
+        for k in range(d):
+            var c = Int(indices[base + k])
+            if shift > 0:
+                c = c >> shift
+            xhrot[k] = centroids[c]
+
+        # Stage 2: rotate back. Zero the output row, then accumulate
+        # `xhrot[k] * R[k, :]` for k in [0, d). R is row-major so R[k, :]
+        # is a contiguous run of d float32s starting at q.R.data + k*d.
+        for j in range(d):
+            X_hat_out[base + j] = Float32(0.0)
+        for k in range(d):
+            _accum_row_f32(X_hat_out + base, q.R.data + k * d, xhrot[k], d)
+
+        # Stage 3: rescale by per-row norm.
+        var nm = norms[i]
+        for j in range(d):
+            X_hat_out[base + j] *= nm
+
+    xhrot.free()
+
+
 def search_twostage(q: Quantizer,
                     nested: NestedCodebook,
                     indices: UnsafePointer[UInt8, MutExternalOrigin],
