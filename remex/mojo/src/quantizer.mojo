@@ -11,7 +11,7 @@ from std.memory import alloc, UnsafePointer
 from std.sys.info import simd_width_of
 from src.codebook import Codebook, NestedCodebook, lloyd_max_codebook
 from src.matrix import Matrix
-from src.rotation import haar_rotation
+from src.rotation import haar_rotation, haar_rotation_numpy
 from src.packing import pack, packed_nbytes
 
 
@@ -166,11 +166,29 @@ struct Quantizer(Movable):
     var seed: UInt64
 
     def __init__(out self, d: Int, bits: Int, seed: UInt64):
+        """Build a Quantizer using the NumPy-compatible RNG.
+
+        Bit-identical to `Python remex.Quantizer(d, bits, seed)` at float32.
+        Use `Quantizer.from_xoshiro_seed` for the legacy fast self-contained
+        path (not parity-compatible with Python).
+        """
         self.d = d
         self.bits = bits
         self.seed = seed
-        self.R = haar_rotation(d, seed)
+        self.R = haar_rotation_numpy(d, seed)
         self.cb = lloyd_max_codebook(d, bits)
+
+    @staticmethod
+    def from_xoshiro_seed(d: Int, bits: Int, seed: UInt64) raises -> Quantizer:
+        """Legacy self-contained Mojo path using xoshiro256++ + Marsaglia.
+
+        Faster initialization (no Ziggurat tables) but NOT bit-identical
+        to a Python `Quantizer(seed=S)`. Kept for users who want a
+        standalone Mojo workflow without Python parity.
+        """
+        var R = haar_rotation(d, seed)
+        var cb = lloyd_max_codebook(d, bits)
+        return Quantizer(R^, cb^, d, bits, seed)
 
     def __init__(out self, var R: Matrix, var cb: Codebook,
                  d: Int, bits: Int, seed: UInt64):

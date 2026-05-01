@@ -22,7 +22,7 @@ from src.params_format import load_params
 from src.pq_format import save_pq, load_pq
 from src.quantizer import Quantizer, encode_batch, adc_search, search_twostage, decode_batch
 from src.packing import pack, packed_nbytes
-from src.rotation import haar_rotation
+from src.rotation import haar_rotation, haar_rotation_numpy
 from src.gpu.device import is_gpu_available
 from src.gpu.encode import gpu_encode_batch
 from src.gpu.adc import gpu_adc_search
@@ -42,13 +42,24 @@ def _arg_idx(args: List[String], flag: String) -> Int:
 
 
 def _build_quantizer(d: Int, bits: Int, seed: UInt64,
-                     params_path: String) raises -> Quantizer:
+                     params_path: String,
+                     rng_choice: String) raises -> Quantizer:
+    """Build a Quantizer from either a .params file or a seed.
+
+    Seed-based modes (default `numpy`) match Python `Quantizer(seed=S)` byte-for-byte.
+    `xoshiro` is the legacy fast self-contained Mojo path (no Python parity).
+    """
     if len(params_path) > 0:
         var R = Matrix(d, d)
         var cb = Codebook(bits)
         load_params(params_path, R, cb)
         return Quantizer(R^, cb^, d, bits, seed)
-    var R = haar_rotation(d, seed)
+    if rng_choice == "xoshiro":
+        var R = haar_rotation(d, seed)
+        var cb = lloyd_max_codebook(d, bits)
+        return Quantizer(R^, cb^, d, bits, seed)
+    # default: numpy-compatible
+    var R = haar_rotation_numpy(d, seed)
     var cb = lloyd_max_codebook(d, bits)
     return Quantizer(R^, cb^, d, bits, seed)
 
@@ -113,13 +124,20 @@ def cmd_encode(args: List[String]) raises:
 
     var device = _parse_device(args)
 
-    print("encode:", input_path, "→", out_path, "(bits =", bits, ", device =", device, ")")
+    var rng_idx = _arg_idx(args, String("--rng"))
+    var rng_choice = String("numpy")
+    if rng_idx >= 0:
+        rng_choice = _arg_str(args, rng_idx + 1)
+        if rng_choice != "numpy" and rng_choice != "xoshiro":
+            raise Error("encode: --rng must be 'numpy' (default) or 'xoshiro'")
+
+    print("encode:", input_path, "→", out_path, "(bits =", bits, ", device =", device, ", rng =", rng_choice, ")")
     var X = load_npy_2d_f32(input_path)
     var n = X.rows
     var d = X.cols
     print("  loaded", n, "vectors of dimension", d)
 
-    var q = _build_quantizer(d, bits, seed, params_path)
+    var q = _build_quantizer(d, bits, seed, params_path, rng_choice)
 
     # Copy X into a fresh buffer (works around an UnsafePointer borrow oddity
     # observed when passing struct fields across function boundaries).
@@ -207,7 +225,14 @@ def cmd_search(args: List[String]) raises:
     if Q.cols != pq.d:
         raise Error("search: query d mismatch")
 
-    var q_quant = _build_quantizer(pq.d, pq.bits, seed, params_path)
+    var rng_idx2 = _arg_idx(args, String("--rng"))
+    var rng_choice2 = String("numpy")
+    if rng_idx2 >= 0:
+        rng_choice2 = _arg_str(args, rng_idx2 + 1)
+        if rng_choice2 != "numpy" and rng_choice2 != "xoshiro":
+            raise Error("search: --rng must be 'numpy' (default) or 'xoshiro'")
+
+    var q_quant = _build_quantizer(pq.d, pq.bits, seed, params_path, rng_choice2)
 
     # Unpack indices into uint8 (n*d). Copy norms into a fresh buffer too —
     # see test_encode.mojo for the same workaround.
@@ -277,6 +302,13 @@ def cmd_decode(args: List[String]) raises:
     if prec_idx >= 0:
         precision = Int(_arg_str(args, prec_idx + 1))
 
+    var rng_idx = _arg_idx(args, String("--rng"))
+    var rng_choice = String("numpy")
+    if rng_idx >= 0:
+        rng_choice = _arg_str(args, rng_idx + 1)
+        if rng_choice != "numpy" and rng_choice != "xoshiro":
+            raise Error("decode: --rng must be 'numpy' (default) or 'xoshiro'")
+
     var out_idx = _arg_idx(args, String("-o"))
     if out_idx < 0:
         raise Error("decode: -o <out.npy> required")
@@ -287,7 +319,7 @@ def cmd_decode(args: List[String]) raises:
           "(n =", pq.n, ", d =", pq.d, ", bits =", pq.bits,
           ", precision =", precision if precision > 0 else pq.bits, ")")
 
-    var q_quant = _build_quantizer(pq.d, pq.bits, seed, params_path)
+    var q_quant = _build_quantizer(pq.d, pq.bits, seed, params_path, rng_choice)
 
     # Build nested centroid tables from the loaded codebook so they match
     # what Python would compute for the same Quantizer (mirrors the

@@ -11,6 +11,7 @@ The resulting Q is uniformly distributed on O(d) (Mezzadri 2007).
 from std.math import sqrt
 from std.memory import alloc, UnsafePointer
 from src.rng import Xoshiro256pp
+from src.rng_numpy import NumpyNormalRNG
 from src.matrix import Matrix, MatrixF64
 
 
@@ -79,7 +80,12 @@ def _householder_qr(mut A: MatrixF64, mut Q: MatrixF64):
 
 
 def haar_rotation(d: Int, seed: UInt64) -> Matrix:
-    """Haar-distributed (d, d) orthogonal matrix as float32."""
+    """Haar-distributed (d, d) orthogonal matrix using xoshiro256++ + Marsaglia.
+
+    NOT bit-identical to Python `Quantizer(seed=S).R` — produces a valid
+    Haar sample but from a different Gaussian stream. Use
+    `haar_rotation_numpy` for byte parity with Python.
+    """
     var rng = Xoshiro256pp(seed)
     var A = MatrixF64(d, d)
     for i in range(d):
@@ -90,6 +96,33 @@ def haar_rotation(d: Int, seed: UInt64) -> Matrix:
     _householder_qr(A, Q)
 
     # Sign-correct: Q[:, j] *= sign(R[j, j])
+    for j in range(d):
+        var diag = A.get(j, j)
+        if diag < 0.0:
+            for i in range(d):
+                Q.set(i, j, -Q.get(i, j))
+
+    return Q.to_float32()
+
+
+def haar_rotation_numpy(d: Int, seed: UInt64) -> Matrix:
+    """Haar-distributed (d, d) orthogonal matrix matching Python `Quantizer(seed=S)`.
+
+    Generates G via the NumPy-compatible RNG (PCG64 + SeedSequence + Ziggurat),
+    then runs the same Householder QR + Mezzadri sign correction as
+    `haar_rotation`. End-to-end this matches Python's `remex.haar_rotation(d, seed)`
+    bit-for-bit at float32 (modulo rare libm tail-rejection rounding).
+    """
+    var rng = NumpyNormalRNG(seed)
+    var A = MatrixF64(d, d)
+    # NumPy fills row-major: A[i, j] is the (i*d + j)-th draw.
+    for i in range(d):
+        for j in range(d):
+            A.set(i, j, rng.next_normal())
+
+    var Q = MatrixF64(d, d)
+    _householder_qr(A, Q)
+
     for j in range(d):
         var diag = A.get(j, j)
         if diag < 0.0:

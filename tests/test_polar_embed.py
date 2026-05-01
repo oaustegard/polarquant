@@ -154,7 +154,10 @@ class TestDistortion:
     @pytest.mark.parametrize("bits", [2, 3, 4])
     def test_mse_below_upper_bound(self, unit_vectors, bits):
         """Empirical MSE should be within 2x of theoretical upper bound."""
-        pq = Quantizer(256, bits=bits)
+        # Use seed != 42 to decouple from the unit_vectors fixture (which is
+        # also default_rng(42)). Sharing a seed correlates the rotation with
+        # the test data and amplifies Haar-sample variance at this dim.
+        pq = Quantizer(256, bits=bits, seed=0)
         empirical = pq.mse(unit_vectors)
         upper = theoretical_mse(256, bits)
         assert empirical < upper * 2.0, (
