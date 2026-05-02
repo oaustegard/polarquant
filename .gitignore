@@ -6,6 +6,7 @@ build/
 .pytest_cache/
 *.npz
 bench/.specter2_cache/
+bench/.onebit_cache/
 bench/plots/
 
 # Mojo build artifacts

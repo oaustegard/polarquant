@@ -104,6 +104,66 @@ Despite the 61% σ deviation, 4-bit R@10 > 0.83 and 8-bit is essentially lossles
 
 See [docs/specter2-case-study.md](../docs/specter2-case-study.md) for full analysis.
 
+### 1-bit Matryoshka extraction at scale (10k corpus, 100 queries)
+
+From `bench/onebit_experiment.py` against the published [SPECTER2 NLP-broad 10k cache](https://github.com/oaustegard/claude-container-layers/releases/tag/specter2-nlp-broad-10k) (run `bash bench/fetch_specter2_cache.sh` once, then `ONEBIT_N=10000 python3 bench/onebit_experiment.py`).
+
+#### Standalone bit sweep
+
+| Bits | Compression | R@10 | R@100 |
+|------|------------|------|-------|
+| 1 | 30.7× | **0.635** | 0.694 |
+| 2 | 15.7× | 0.501 | 0.628 |
+| 3 | 10.5× | 0.595 | 0.732 |
+| 4 | 7.9× | 0.731 | 0.820 |
+| 8 | 4.0× | 0.971 | 0.984 |
+
+**1-bit dominates 2-bit and 3-bit on R@10**, and beats 2-bit on R@100. The "valley" extends across 1–3 bits, not just 2-bit. Lloyd-Max wins back at 4-bit. This is consistent with Charikar's SimHash result: sign-bit hashing is asymptotically optimal for cosine similarity preservation, while Lloyd-Max optimizes per-coordinate MSE — a different (and at low bits, worse) objective for inner-product retrieval. The 2-bit and 3-bit Lloyd-Max boundaries land inside the dense Gaussian lobe of post-rotation coordinates, creating systematic ranking errors that the 1-bit sign-only comparison avoids.
+
+#### Matryoshka extraction (encode @ 8-bit, search @ precision)
+
+| Precision | R@10 | R@100 | Δ@10 vs standalone |
+|-----------|------|-------|--------------------|
+| 1 | 0.635 | 0.694 | **+0.000** (bit-for-bit identical) |
+| 2 | 0.381 | 0.531 | −0.120 (~12% nesting penalty) |
+| 4 | 0.756 | 0.835 | +0.025 (slightly better than standalone) |
+
+The 1-bit Matryoshka extraction has zero nesting penalty because the MSB of an n-bit Lloyd-Max code *is* the sign bit, which is exactly the standalone 1-bit code. The invariant is enforced in `tests/test_matryoshka.py::TestPrecisionOneBit::test_matryoshka_1bit_equals_standalone_1bit`.
+
+#### Two-stage retrieval: 1-bit coarse → 8-bit rerank
+
+| Candidates | % of corpus | R@10 | R@100 |
+|------------|------------|------|-------|
+| 100 | 1.0% | 0.966 | 0.694 |
+| 150 | 1.5% | **0.971** | 0.824 |
+| 200 | 2.0% | 0.972 | 0.888 |
+| 300 | 3.0% | 0.971 | 0.946 |
+
+**At 1.5% candidate budget, R@10 matches the full-8-bit ceiling (0.971).** The 1-bit coarse pass narrows the field aggressively but retains the top-10 winners.
+
+#### Two-stage retrieval: 2-bit coarse → 8-bit rerank (for comparison)
+
+| Candidates | R@10 | R@100 | Gap vs 1-bit coarse |
+|------------|------|-------|--------------------|
+| 100 | 0.851 | 0.531 | −11.5 pp R@10 |
+| 150 | 0.910 | 0.649 | −6.1 pp R@10 |
+| 200 | 0.937 | 0.724 | −3.5 pp R@10 |
+| 300 | 0.948 | 0.820 | −2.3 pp R@10 |
+
+**2-bit coarse is dominated by 1-bit coarse at every candidate budget**, while requiring 2× the in-memory footprint. There is no scenario in this experiment where 2-bit is the right architectural choice.
+
+#### Architectural takeaway for very-large-scale two-stage retrieval
+
+For the Semantic Scholar use case (~100M SPECTER2 vectors, two-stage with in-memory coarse + RDS-resident 8-bit rerank), the recommended configuration is:
+
+- **In-memory coarse tier**: 1-bit Matryoshka extracted from the 8-bit codes (right-shift to MSB). At d=768 this packs to **9.6 GB for 100M vectors**. The coarse score is `popcount(query_signs XOR coarse_signs)` — no Lloyd-Max lookup needed.
+- **Rerank tier**: 8-bit Lloyd-Max indices stored in Postgres, fetched by ID for the top-K candidates returned by the coarse pass. At K~1.5% of corpus, R@10 matches the full-8-bit ceiling.
+- **What not to do**: 2-bit coarse. Half the recall, twice the RAM, no upside.
+
+#### A note on σ-ratio measurement
+
+The 10k experiment reports σ ratio = 0.9993 using `np.std(rotated_flattened)` over the rotated `(n, d)` matrix. The existing 1k-paper section above reports σ ratio = 0.389 using per-coordinate σ mean. These are different statistics — they coincide for zero-mean-per-coord Gaussian samples but diverge if SPECTER2's post-rotation marginals have non-zero per-coordinate means. Reconciling the two metrics on the same 10k corpus is queued as a follow-up; meanwhile, the recall results above are based on identical rotation + Lloyd-Max code paths as `bench/specter2_eval.py`, so distribution-analysis discrepancies don't affect them.
+
 ## Research investigations
 
 - [docs/research/hybrid-precision-quantization.md](../docs/research/hybrid-precision-quantization.md) — Ported OjaKV&rsquo;s &ldquo;keep high-residual vectors at higher precision&rdquo; trick to TurboQuant-style scalar quantization. Verdict: FILE. Residual distribution is near-flat under Haar rotation + Lloyd-Max (top 10% of vectors carry only 10.8% of error mass), and cross-tier score merging is miscalibrated on anisotropic embeddings (e.g. SPECTER2). `search_twostage()` remains the right memory/recall trade-off.
