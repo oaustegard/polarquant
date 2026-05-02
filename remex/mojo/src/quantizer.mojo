@@ -150,6 +150,45 @@ fn _sumsq_f64(a: UnsafePointer[Float32, MutExternalOrigin], n: Int) -> Float64:
     return s
 
 
+fn _heap_sift_down(scores: UnsafePointer[Float32, MutExternalOrigin],
+                   indices: UnsafePointer[Int, MutExternalOrigin],
+                   root: Int, size: Int):
+    """Sift `root` downward to restore min-heap property keyed by `scores`.
+
+    Min-heap: every parent has a score <= each of its children. The root
+    holds the smallest score in the heap — i.e. the one to evict when a
+    strictly-larger candidate arrives.
+    """
+    var r = root
+    while True:
+        var left = 2 * r + 1
+        var right = 2 * r + 2
+        var smallest = r
+        if left < size and scores[left] < scores[smallest]:
+            smallest = left
+        if right < size and scores[right] < scores[smallest]:
+            smallest = right
+        if smallest == r:
+            return
+        var ts = scores[r]
+        var ti = indices[r]
+        scores[r] = scores[smallest]
+        indices[r] = indices[smallest]
+        scores[smallest] = ts
+        indices[smallest] = ti
+        r = smallest
+
+
+fn _heap_build_min(scores: UnsafePointer[Float32, MutExternalOrigin],
+                   indices: UnsafePointer[Int, MutExternalOrigin],
+                   size: Int):
+    """Bottom-up heapify over `size` parallel score/index slots."""
+    var i = (size - 2) // 2
+    while i >= 0:
+        _heap_sift_down(scores, indices, i, size)
+        i -= 1
+
+
 def _searchsorted(boundaries: UnsafePointer[Float32, MutExternalOrigin],
                   n_b: Int, x: Float32) -> Int:
     """numpy-default 'left' binary search: smallest i such that x < boundaries[i],
@@ -500,23 +539,31 @@ def search_twostage(q: Quantizer,
         coarse_scores[i] = s * norms[i]
     coarse_table.free()
 
-    # Pick the top `coarse_k` candidates by coarse score (selection-style).
-    # Order within the candidate set doesn't matter — only membership does.
+    # Pick the top `coarse_k` candidates by coarse score using a min-heap.
+    # The heap root tracks the smallest-score-currently-kept; replace it
+    # whenever a strictly-larger candidate arrives. Strict ">" matches the
+    # tie-break of the previous selection loop (same-score candidates do
+    # not displace each other), so the candidate-set MEMBERSHIP — and
+    # therefore the rerank output — is identical. Order within the set
+    # doesn't matter for the rerank, so heap order is fine.
+    # O(n log k) ≈ 90× fewer comparisons than the prior O(n·k) at the
+    # default (n=10000, candidates=500) settings — closes issue #49.
+    var heap_scores = alloc[Float32](coarse_k)
+    var heap_idx = alloc[Int](coarse_k)
+    for i in range(coarse_k):
+        heap_scores[i] = coarse_scores[i]
+        heap_idx[i] = i
+    _heap_build_min(heap_scores, heap_idx, coarse_k)
+    for i in range(coarse_k, n):
+        if coarse_scores[i] > heap_scores[0]:
+            heap_scores[0] = coarse_scores[i]
+            heap_idx[0] = i
+            _heap_sift_down(heap_scores, heap_idx, 0, coarse_k)
     var cand_idx = alloc[Int](coarse_k)
-    var used = alloc[UInt8](n)
-    for i in range(n):
-        used[i] = UInt8(0)
-    for outer in range(coarse_k):
-        var best_i: Int = -1
-        var best_s: Float32 = Float32(0.0)
-        for i in range(n):
-            if used[i] == UInt8(0):
-                if best_i < 0 or coarse_scores[i] > best_s:
-                    best_i = i
-                    best_s = coarse_scores[i]
-        cand_idx[outer] = best_i
-        used[best_i] = UInt8(1)
-    used.free()
+    for ci in range(coarse_k):
+        cand_idx[ci] = heap_idx[ci]
+    heap_scores.free()
+    heap_idx.free()
     coarse_scores.free()
 
     # Stage 2: full-precision rerank on the candidate set.
