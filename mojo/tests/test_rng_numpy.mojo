@@ -171,7 +171,7 @@ def _read_f64_bin(path: String, n: Int) raises -> UnsafePointer[Float64, MutExte
 def test_pcg64_first_1000() raises:
     """First 1000 raw uint64 outputs vs NumPy fixture."""
     var expected = _read_u64_bin(
-        "/home/user/claude-workspace/.spokes/remex/remex/mojo/tests/fixtures/raw_u64_seed42.bin",
+        "/home/user/claude-workspace/.spokes/remex/mojo/tests/fixtures/raw_u64_seed42.bin",
         1000,
     )
     var rng = PCG64(UInt64(42))
@@ -193,7 +193,7 @@ def test_pcg64_first_1000() raises:
 def test_standard_normal_first_1000() raises:
     """First 1000 standard_normal outputs vs NumPy fixture."""
     var expected_arr = _read_f64_bin(
-        "/home/user/claude-workspace/.spokes/remex/remex/mojo/tests/fixtures/normal_f64_seed42.bin",
+        "/home/user/claude-workspace/.spokes/remex/mojo/tests/fixtures/normal_f64_seed42.bin",
         1000,
     )
     var rng = NumpyNormalRNG(UInt64(42))
