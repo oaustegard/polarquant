@@ -81,7 +81,10 @@ python bench/real_embedding_eval.py     # needs sentence-transformers + faiss-cp
 
 1. **Norms stored separately as float32** — preserves inner-product ranking up to quantization error. This is why 8-bit gives R@10=0.98+ despite "only" 4x compression.
 
-2. **Matryoshka via right-shift** — An n-bit index's top k bits are a valid k-bit code. This enables two-stage search from a single encoding, but incurs ~1.2% nesting penalty at 4-bit and ~10% at 2-bit vs independently optimized codebooks.
+2. **Matryoshka via right-shift** — An n-bit index's top k bits are a valid k-bit code. This enables two-stage search from a single encoding. The nesting penalty depends on which level you extract:
+   - **1-bit**: 0% penalty (the MSB of an n-bit Lloyd-Max code *is* the sign bit, which is exactly the standalone 1-bit code). `tests/test_matryoshka.py::TestPrecisionOneBit::test_matryoshka_1bit_equals_standalone_1bit` enforces this bit-for-bit equality.
+   - **4-bit**: ~1.2% recall penalty vs an independently-optimized 4-bit codebook.
+   - **2-bit**: ~10% recall penalty (worst level — the inner Lloyd-Max boundaries don't align with sign-based partitioning).
 
 3. **ADC for memory efficiency** — The lookup table `(d, 2^bits)` is tiny (~6KB for 2-bit d=384). Chunked scoring keeps temporary allocation at ~6MB regardless of corpus size.
 

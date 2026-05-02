@@ -448,7 +448,7 @@ def benchmark_recall(
     truth = exact_knn(search_corpus, queries, max_k)
 
     results = []
-    bits_list = [2, 3, 4, 8]
+    bits_list = [1, 2, 3, 4, 8]
     k_list = [10, 100]
 
     header = f"  {'Method':<20s} {'Comp':>6s} {'R@10':>7s} {'R@100':>7s}"
@@ -472,6 +472,30 @@ def benchmark_recall(
             "compression_ratio": ratio,
             "recall_10": r10,
             "recall_100": r100,
+        })
+
+    # Matryoshka extraction sweep: encode at 8-bit, retrieve at lower precisions.
+    # Tests whether the right-shift nesting penalty matches the standalone
+    # codebook recall at each precision.
+    print()
+    print("  Matryoshka extraction (encode @ 8-bit, search @ precision):")
+    pq8 = Quantizer(d=d, bits=8)
+    cv8 = pq8.encode(search_corpus)
+    standalone = {r["bits"]: r for r in results}
+    for prec in [1, 2, 4]:
+        pred, _ = pq8.search_batch(cv8, queries, k=max_k, precision=prec)
+        r10 = recall_at_k(pred[:, :10], truth[:, :10], 10)
+        r100 = recall_at_k(pred[:, :100], truth[:, :100], 100)
+        delta = r10 - standalone[prec]["recall_10"]
+        print(f"  matryoshka-{prec}bit       (8x{prec}/8) {r10:>7.3f} {r100:>7.3f}   "
+              f"Δ@10={delta:+.3f} vs standalone")
+        results.append({
+            "method": f"matryoshka-{prec}bit-from-8bit",
+            "bits": prec,
+            "source_bits": 8,
+            "recall_10": r10,
+            "recall_100": r100,
+            "delta_vs_standalone": delta,
         })
 
     return results
