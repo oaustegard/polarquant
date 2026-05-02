@@ -67,6 +67,12 @@ pytest tests/test_adc_gpu.py -v  # just ADC/GPU tests, ~30s
 python bench/benchmark.py               # synthetic data, no extra deps
 pip install -e ".[bench]"               # for real embedding benchmarks
 python bench/real_embedding_eval.py     # needs sentence-transformers + faiss-cpu
+
+# SPECTER2 (allenai/specter2_base, d=768) — encoding the transformer takes
+# ~50 min on CPU per 10k papers. Skip the encode by pulling a precomputed
+# cache from GH release:
+bash bench/fetch_specter2_cache.sh      # ~45 MB, restores .specter2_cache/
+python bench/specter2_eval.py --cached  # then run the bench against the cache
 ```
 
 ## Code conventions
