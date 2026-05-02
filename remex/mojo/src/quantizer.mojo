@@ -128,6 +128,70 @@ fn _dot_block_8(r_row: UnsafePointer[Float32, MutExternalOrigin],
     dst[7] = s7
 
 
+fn _coarse_score_block_8(indices: UnsafePointer[UInt8, MutExternalOrigin],
+                         coarse_table: UnsafePointer[Float32, MutExternalOrigin],
+                         norms: UnsafePointer[Float32, MutExternalOrigin],
+                         scores: UnsafePointer[Float32, MutExternalOrigin],
+                         ii: Int, d: Int, n_levels_coarse: Int, shift: Int):
+    """Coarse-stage ADC scoring for 8 rows, fused over a single j sweep.
+
+    For io in [0, 8), computes:
+        scores[ii+io] = (sum_j coarse_table[j, indices[(ii+io)*d + j] >> shift])
+                       * norms[ii+io]
+
+    Mirrors the NB=8 row-blocking strategy from `_dot_block_8`: one
+    `coarse_table[j, *]` row is loaded once per j-step and reused across
+    8 partial sums, instead of re-walking the table per row. Unlike the
+    encode kernel, SIMD doesn't apply directly — each row gathers a
+    *different* element of the table row, so the inner op is a
+    scalar-gather + add. The win is ILP: 8 independent gather/FMA chains
+    let the CPU's out-of-order pipeline overlap latencies that a single
+    serialized chain would stall on.
+
+    Per-row reduction order is identical to the unblocked path: a single
+    accumulator summing across j in order. Float addition is not
+    associative, but each accumulator sees the same j sequence as before,
+    so coarse_scores are bit-identical to the scalar fallback.
+    """
+    var s0: Float32 = Float32(0.0)
+    var s1: Float32 = Float32(0.0)
+    var s2: Float32 = Float32(0.0)
+    var s3: Float32 = Float32(0.0)
+    var s4: Float32 = Float32(0.0)
+    var s5: Float32 = Float32(0.0)
+    var s6: Float32 = Float32(0.0)
+    var s7: Float32 = Float32(0.0)
+
+    var p0 = indices + (ii + 0) * d
+    var p1 = indices + (ii + 1) * d
+    var p2 = indices + (ii + 2) * d
+    var p3 = indices + (ii + 3) * d
+    var p4 = indices + (ii + 4) * d
+    var p5 = indices + (ii + 5) * d
+    var p6 = indices + (ii + 6) * d
+    var p7 = indices + (ii + 7) * d
+
+    for j in range(d):
+        var trow = coarse_table + j * n_levels_coarse
+        s0 += trow[Int(p0[j]) >> shift]
+        s1 += trow[Int(p1[j]) >> shift]
+        s2 += trow[Int(p2[j]) >> shift]
+        s3 += trow[Int(p3[j]) >> shift]
+        s4 += trow[Int(p4[j]) >> shift]
+        s5 += trow[Int(p5[j]) >> shift]
+        s6 += trow[Int(p6[j]) >> shift]
+        s7 += trow[Int(p7[j]) >> shift]
+
+    scores[ii + 0] = s0 * norms[ii + 0]
+    scores[ii + 1] = s1 * norms[ii + 1]
+    scores[ii + 2] = s2 * norms[ii + 2]
+    scores[ii + 3] = s3 * norms[ii + 3]
+    scores[ii + 4] = s4 * norms[ii + 4]
+    scores[ii + 5] = s5 * norms[ii + 5]
+    scores[ii + 6] = s6 * norms[ii + 6]
+    scores[ii + 7] = s7 * norms[ii + 7]
+
+
 fn _sumsq_f64(a: UnsafePointer[Float32, MutExternalOrigin], n: Int) -> Float64:
     """Sum of squares with float64 accumulator (returned as float64).
 
@@ -528,15 +592,27 @@ def search_twostage(q: Quantizer,
         for c in range(n_levels_coarse):
             coarse_table[trow + c] = qj * coarse_centroids[c]
 
+    # Coarse ADC scoring: NB=8 row-blocked. Each block fuses 8 rows over a
+    # single j sweep, sharing one `coarse_table[j, *]` row pointer per step
+    # — same row-blocking idea as `_dot_block_8` in encode_batch (issue #41,
+    # PR #47), retargeted to the gather + accumulate kernel here. Closes #50.
+    # Per-row reduction order matches the scalar fallback (single accumulator
+    # over j in order), so byte-for-byte parity vs Python is preserved.
     var coarse_scores = alloc[Float32](n)
-    for i in range(n):
+    var ii = 0
+    while ii + _NB <= n:
+        _coarse_score_block_8(indices, coarse_table, norms, coarse_scores,
+                              ii, d, n_levels_coarse, shift)
+        ii += _NB
+    while ii < n:
         var s: Float32 = Float32(0.0)
-        var base = i * d
+        var base = ii * d
         for j in range(d):
             var c_full = Int(indices[base + j])
             var c_coarse = c_full >> shift if shift > 0 else c_full
             s += coarse_table[j * n_levels_coarse + c_coarse]
-        coarse_scores[i] = s * norms[i]
+        coarse_scores[ii] = s * norms[ii]
+        ii += 1
     coarse_table.free()
 
     # Pick the top `coarse_k` candidates by coarse score using a min-heap.
