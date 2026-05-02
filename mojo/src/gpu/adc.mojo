@@ -1,4 +1,4 @@
-"""GPU ADC search kernel for `polarquant search --device gpu`.
+"""GPU ADC search kernel for `remex search --device gpu`.
 
 Stub for issue #42. The CPU contract
 (`src/quantizer.mojo::adc_search`) is the reference; this kernel must

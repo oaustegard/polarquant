@@ -13,7 +13,7 @@ Layout (little-endian):
 
 This is a minimal alternative to the Python `.npz` format that is trivially
 parseable from Mojo without unzip/numpy-header machinery. See
-`remex/mojo/src/pq_format.mojo`.
+`mojo/src/pq_format.mojo`.
 """
 
 from __future__ import annotations

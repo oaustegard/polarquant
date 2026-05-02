@@ -14,7 +14,7 @@ import numpy as np
 def _householder_qr(A: np.ndarray) -> np.ndarray:
     """In-place Householder QR; returns Q. After the call A holds R.
 
-    Reflector convention (must match ``remex/mojo/src/rotation.mojo``):
+    Reflector convention (must match ``mojo/src/rotation.mojo``):
       - ``alpha = -sign(A[k,k]) * ||A[k:, k]||`` with ``sign(0) = +1``
       - ``v = A[k:, k] - alpha * e_1``, normalized
       - Apply ``H = I - 2 v v^T`` to ``A[k:, k:]`` from the left and to

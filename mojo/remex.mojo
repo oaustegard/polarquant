@@ -1,9 +1,9 @@
-"""polarquant CLI — Mojo port of the remex compress/search workflow.
+"""remex CLI — Mojo port of the remex compress/search workflow.
 
 Usage:
-    polarquant encode <input.npy> --bits N [--seed S | --params P.bin] -o <out.pq>
-    polarquant search <index.pq> <query.npy> --k K [--seed S | --params P.bin]
-                       [--top <int>]
+    remex encode <input.npy> --bits N [--seed S | --params P.bin] -o <out.pq>
+    remex search <index.pq> <query.npy> --k K [--seed S | --params P.bin]
+                  [--top <int>]
 
 `--seed S`   computes (R, codebook) from seed S in Mojo (not bit-identical to
              a Python Quantizer with the same seed; see README).
@@ -66,10 +66,10 @@ def _build_quantizer(d: Int, bits: Int, seed: UInt64,
 
 def _print_usage():
     print("usage:")
-    print("  polarquant encode <input.npy> --bits N (--seed S | --params P) [--device cpu|gpu] -o <out.pq>")
-    print("  polarquant search <index.pq> <query.npy> --k K (--seed S | --params P) [--device cpu|gpu] [--top T]")
-    print("                   [--twostage --candidates N --coarse-precision K]")
-    print("  polarquant decode <index.pq> (--seed S | --params P) [--precision P] -o <out.npy>")
+    print("  remex encode <input.npy> --bits N (--seed S | --params P) [--device cpu|gpu] -o <out.pq>")
+    print("  remex search <index.pq> <query.npy> --k K (--seed S | --params P) [--device cpu|gpu] [--top T]")
+    print("              [--twostage --candidates N --coarse-precision K]")
+    print("  remex decode <index.pq> (--seed S | --params P) [--precision P] -o <out.npy>")
 
 
 def _parse_device(args: List[String]) raises -> String:

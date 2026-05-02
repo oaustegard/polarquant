@@ -2,7 +2,7 @@
 
 Generates a synthetic standard-normal corpus, runs the same workload
 through (a) the Python `remex.Quantizer` and (b) the Mojo binaries built
-from `polarquant.mojo`. Prints a comparison table.
+from `remex.mojo`. Prints a comparison table.
 
 Usage:
     python bench/compare.py [--n 10000] [--d 384] [--bits 4]
@@ -27,7 +27,7 @@ import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
 MOJO_DIR = THIS_DIR.parent
-REPO_ROOT = MOJO_DIR.parents[1]
+REPO_ROOT = MOJO_DIR.parent
 
 
 def _run_mojo(binary: str, args: list[str]) -> str:

@@ -95,7 +95,7 @@ def main() raises:
     var q_quant = Quantizer(R^, cb^, d, bits, UInt64(42))
 
     # Unpack indices once. Copy norms into a fresh buffer (UnsafePointer field
-    # aliasing workaround — see `polarquant.mojo` cmd_search).
+    # aliasing workaround — see `remex.mojo` cmd_search).
     var indices = alloc[UInt8](n * d)
     unpack(pq.packed_indices, n * d, bits, indices)
     var norms_local = alloc[Float32](n)

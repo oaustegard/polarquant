@@ -1,4 +1,4 @@
-# remex Mojo port (`polarquant`)
+# remex Mojo port
 
 A pure-Mojo port of the remex Quantizer's encode + ADC search +
 decode path, shipped as a standalone CLI binary.
@@ -10,9 +10,9 @@ Closes [issue #5](https://github.com/oaustegard/remex/issues/5),
 ## What's here
 
 ```
-remex/mojo/
+mojo/
 ├── README.md                # This file
-├── polarquant.mojo          # CLI entrypoint (encode + search + decode)
+├── remex.mojo               # CLI entrypoint (encode + search + decode)
 ├── src/
 │   ├── mathx.mojo           # erf-based normal CDF / PDF
 │   ├── rng.mojo             # xoshiro256++ + Marsaglia polar normal
@@ -41,6 +41,7 @@ remex/mojo/
 │   ├── test_gpu_encode.mojo        # encode parity for --device gpu (skipped without GPU)
 │   └── test_gpu_search.mojo        # ADC parity vs CPU for --device gpu (skipped without GPU)
 └── bench/
+    ├── RESULTS.md              # Mojo vs NumPy benchmark results
     ├── bench_encode.mojo
     ├── bench_search.mojo
     ├── bench_twostage.mojo
@@ -61,8 +62,8 @@ uv pip install --system --break-system-packages mojo max
 Build the CLI and the bench binaries:
 
 ```bash
-cd remex/mojo
-mojo build -I . polarquant.mojo            -o polarquant
+cd mojo
+mojo build -I . remex.mojo                 -o remex
 mojo build -I . bench/bench_encode.mojo    -o bench/bench_encode
 mojo build -I . bench/bench_search.mojo    -o bench/bench_search
 mojo build -I . bench/bench_twostage.mojo  -o bench/bench_twostage
@@ -72,20 +73,20 @@ mojo build -I . bench/bench_twostage.mojo  -o bench/bench_twostage
 
 ```bash
 # Encode an .npy of float32 vectors → .pq
-./polarquant encode corpus.npy --bits 4 --seed 42 -o corpus.pq
+./remex encode corpus.npy --bits 4 --seed 42 -o corpus.pq
 
 # Search a single (1, d) query against a .pq, top-k
-./polarquant search corpus.pq query.npy --k 10 --seed 42 --top 10
+./remex search corpus.pq query.npy --k 10 --seed 42 --top 10
 
 # Memory-efficient two-stage retrieval: coarse ADC scan at reduced
 # precision, full-precision rerank on the top `--candidates` rows.
-./polarquant search corpus.pq query.npy --k 10 --seed 42 \
+./remex search corpus.pq query.npy --k 10 --seed 42 \
     --twostage --candidates 500 --coarse-precision 2
 
 # Reconstruct float32 vectors from a .pq → .npy. Optional --precision
 # uses the nested codebook at a coarser bit width (1..bits).
-./polarquant decode corpus.pq --params P.bin -o reconstructed.npy
-./polarquant decode corpus.pq --params P.bin --precision 2 -o coarse.npy
+./remex decode corpus.pq --params P.bin -o reconstructed.npy
+./remex decode corpus.pq --params P.bin --precision 2 -o coarse.npy
 ```
 
 The same `corpus.pq` round-trips through the Python library:
@@ -108,7 +109,7 @@ provides those two ways:
 | `--params P.bin` | Loaded from a file written by `remex.save_params(quantizer, P)` | **Yes**, at all bit widths. |
 
 `--seed` (numpy mode, the default) gives a self-contained Mojo workflow
-with end-to-end byte parity vs Python: `polarquant encode X.npy --bits 4
+with end-to-end byte parity vs Python: `remex encode X.npy --bits 4
 --seed 42 -o out.pq` produces the same bytes as Python's
 `save_pq(Quantizer(d, 4, seed=42).encode(X))`. This was the goal of
 issue #40 and uses the new `src/rng_numpy.mojo` module.
@@ -137,7 +138,7 @@ stdlib precision limitation, not a remex algorithm issue.)
 ## Tests
 
 ```bash
-cd remex/mojo
+cd mojo
 mojo run -I . tests/test_rng.mojo
 mojo run -I . tests/test_rng_numpy.mojo   # NumPy-bit-identical RNG (issue #40)
 mojo run -I . tests/test_rotation.mojo
@@ -254,11 +255,11 @@ mojo run -I . tests/test_search_twostage.mojo
 ## Benchmarks
 
 ```bash
-cd remex/mojo
+cd mojo
 python bench/compare.py --n 10000 --d 384 --bits 4 --queries 100 --k 10
 ```
 
-See `bench/RESULTS.md` (in this PR) for current numbers.
+See [`bench/RESULTS.md`](bench/RESULTS.md) for current numbers.
 
 ## GPU / MAX path (`--device gpu`)
 
@@ -281,8 +282,8 @@ uv pip install --system --break-system-packages modular --no-deps
 uv pip install --system --break-system-packages mojo max
 
 # Build the CLI + GPU bench binaries (same flags as CPU).
-cd remex/mojo
-mojo build -I . polarquant.mojo                -o polarquant
+cd mojo
+mojo build -I . remex.mojo                     -o remex
 mojo build -I . bench/bench_gpu_encode.mojo    -o bench/bench_gpu_encode
 mojo build -I . bench/bench_gpu_search.mojo    -o bench/bench_gpu_search
 ```
@@ -291,8 +292,8 @@ mojo build -I . bench/bench_gpu_search.mojo    -o bench/bench_gpu_search
 
 ```bash
 # Encode + search on GPU (errors with a clear message until kernels land).
-./polarquant encode corpus.npy --bits 4 --params P.bin --device gpu -o corpus.pq
-./polarquant search corpus.pq query.npy --k 10 --params P.bin --device gpu --top 10
+./remex encode corpus.npy --bits 4 --params P.bin --device gpu -o corpus.pq
+./remex search corpus.pq query.npy --k 10 --params P.bin --device gpu --top 10
 ```
 
 ### Tests
@@ -313,7 +314,7 @@ identical indices).
 
 Per issue #42:
 
-- `polarquant encode --device gpu` produces packed indices byte-identical
+- `remex encode --device gpu` produces packed indices byte-identical
   to the CPU path on the same input + `(R, codebook)`, modulo a
   documented FP-order tolerance for boundary-adjacent coordinates.
 - `bench/RESULTS.md § Mojo port` gains a row for GPU encode + search
@@ -342,11 +343,12 @@ already works.
   brings Mojo encode from 179 µs/vec (pre-SIMD) → 21 µs/vec (PR #37)
   → 12 µs/vec (this) at d=384, **1.26× faster than NumPy's BLAS
   `X @ R.T`** on AVX-512 (issue #41).
-- **`search_twostage` is naive.** The coarse stage is a straightforward
-  per-row ADC table lookup (no SIMD on the lookup gather), and the
-  candidate selection is O(n*candidates). Mirrors the structure of
-  `adc_search` in this port. Tighter inner-loop kernels — especially
-  for the coarse-stage reduction at low precision — are a follow-up.
+- **`search_twostage` coarse top-k is heap-based.** Min-heap over the
+  coarse-stage scores brings the selection from O(n·candidates) to
+  O(n log k) — ~90× fewer comparisons at default n=10k, candidates=500
+  (PR #51, closing issue #49). The coarse-stage inner loop itself is
+  still scalar gather+arithmetic; tighter SIMD on that gather is the
+  next bottleneck (issue #50).
 - **GPU kernels are stubbed.** `--device gpu` is wired through the CLI,
   tests, and bench drivers, but `src/gpu/encode.mojo` and
   `src/gpu/adc.mojo` raise until the MAX implementation lands — see

@@ -1,4 +1,4 @@
-"""GPU encode kernel for `polarquant encode --device gpu`.
+"""GPU encode kernel for `remex encode --device gpu`.
 
 Stub for issue #42. The CPU contract (`src/quantizer.mojo::encode_batch`)
 is the reference; this kernel must produce byte-identical packed indices
