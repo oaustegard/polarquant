@@ -156,9 +156,9 @@ def main() -> int:
     )
     print()
     print(
-        "Note: the Mojo and NumPy paths use *different* random rotations "
-        "(different RNGs from the same seed). The encoding is correct in "
-        "both cases; recall is the property to compare, not exact indices."
+        "Note: Mojo (default --rng numpy) and NumPy share the RNG stack "
+        "(PCG64 + SeedSequence + Ziggurat) since #40, so encoded indices "
+        "are byte-identical at 1-4 bits. Pass --rng xoshiro to opt out."
     )
     return 0
 

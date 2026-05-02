@@ -132,41 +132,51 @@ Float32 baseline: 1,536 bytes/vector, 15.36 MB per 10k vectors.
 
 ## Mojo port (`polarquant`) vs NumPy
 
-Standalone Mojo binary built from `remex/mojo/` (see issue #5 / the
-Mojo port PR). The Python and Mojo paths use **different** rotations
-(NumPy `default_rng` PCG64 + Ziggurat vs Mojo xoshiro256++ +
-Marsaglia polar) — both are valid Haar samples; the encoding is
-algorithmically identical given matching parameters. With `--params`
-mode (Python dumps R + codebook, Mojo loads them), `polarquant
-encode` produces a `.pq` byte-identical to Python's
-`save_pq(quantizer.encode(X))`.
+Standalone Mojo binary built from `remex/mojo/` (issue #5).
 
-Wall-clock (n=10k, d=384, bits=4, queries=50, k=10, container CPU):
+Since [#40](https://github.com/oaustegard/remex/issues/40), Mojo's
+default `--seed S` path uses the same RNG stack as NumPy
+(`SeedSequence + PCG64 + Ziggurat`) and produces a `.pq`
+**byte-identical** to Python's `save_pq(Quantizer(d, bits, seed=S).encode(X))`
+at 1–4 bits. (`--rng xoshiro` opts back into the legacy
+xoshiro256++ + Marsaglia path; `--params` remains the canonical
+all-bit-widths bridge.) See `remex/mojo/README.md#two-parameter-modes`.
 
-| Stage           | NumPy    | Mojo (initial port) | Mojo (SIMD) | Mojo (SIMD) / NumPy |
-|-----------------|---------:|--------------------:|------------:|--------------------:|
-| encode (µs/vec) |    16.0  |              179.4  |       20.9  |       1.30x slower  |
-| ADC search (ms/q) |  22.8  |                4.9  |        4.9  |       4.6x faster   |
+### Wall-clock (n=10k, bits=4, queries=100, k=10, container CPU)
 
-The initial Mojo port encode used a naive scalar matvec (`for k:
-for j: s += R[k,j] * X[j]`) and was 4.3x slower than NumPy's
-BLAS-backed `X @ R.T`. Replacing the inner loop with a
-`simd_width_of[DType.float32]()`-wide FMA + horizontal reduce
-(see `_dot_f32` in `src/quantizer.mojo`) closed the gap to 1.3x
-— an **8.6x speedup on the Mojo encode kernel itself**. ADC
-search continues to win because its gather-heavy inner loop is
-straight-line scalar code that LLVM auto-vectorizes well, while
-the equivalent NumPy is bottlenecked on `np.outer` and chunk-wise
-gathers.
+#### d=384 (median of 5 trials)
 
-Reproduce:
+| Stage              |    NumPy |    Mojo | Speedup |
+|--------------------|---------:|--------:|--------:|
+| encode (µs/vec)    |     17.0 |    13.3 | **1.27x** |
+| ADC search (ms/q)  |     16.4 |     2.7 | **6.0x**  |
+| twostage (ms/q)    |     17.3 |    19.0 | 0.91x   |
+
+#### Scaling across `d` (1 trial each, indicative)
+
+| `d`  | NumPy encode (µs) | Mojo encode (µs) | encode speedup | NumPy search (ms) | Mojo search (ms) | search speedup | NumPy twostage (ms) | Mojo twostage (ms) | twostage speedup |
+|-----:|------------------:|-----------------:|---------------:|------------------:|-----------------:|---------------:|--------------------:|-------------------:|-----------------:|
+|   64 |              3.65 |             1.72 |          2.12x |              2.99 |             0.70 |          4.30x |                3.24 |              16.59 |            0.20x |
+|  256 |             13.21 |             8.24 |          1.60x |             11.63 |             1.85 |          6.28x |               12.38 |              17.60 |            0.70x |
+|  384 |             ~17.0 |            ~13.3 |          1.27x |             16.40 |             2.71 |          6.01x |               17.26 |              19.00 |            0.91x |
+|  768 |             44.52 |            39.65 |          1.12x |             36.28 |             5.36 |          6.77x |               36.69 |              23.58 |          **1.56x** |
+
+### Notes
+
+- **Encode** crossed from 1.3x slower (initial port, scalar matvec, `_dot_f32` only) to 1.27x faster after [#37](https://github.com/oaustegard/remex/pull/37) (SIMD vectorization) + [#41](https://github.com/oaustegard/remex/issues/41) (NB=8 row-blocking through `_dot_block_8`). The float64-accumulator norm change in [#40](https://github.com/oaustegard/remex/issues/40) (needed for byte parity vs Python's `np.linalg.norm`) did not measurably regress encode speed — norm is a tiny fraction of the encode hot path.
+- **ADC search** wins consistently (4–7×) because Mojo's gather-then-scalar-add inner loop auto-vectorizes well; NumPy's equivalent is bottlenecked on per-chunk `np.outer` + `table[idx]` gathers.
+- **Twostage** is the weak spot. Mojo's `search_twostage` time is roughly d-independent (~17–24 ms across all d), while NumPy scales with d. Mojo loses at small d (5× slower at d=64) and wins at large d (1.56× faster at d=768). The dominant cost is the O(n·candidates) selection-style coarse top-k loop in `search_twostage` — flagged as "naive" in `remex/mojo/README.md#known-gaps`. A min-heap or quickselect would drop that to O(n log k) ≈ 90× fewer ops at n=10k, candidates=500.
+- **Encode advantage at d=768** shrinks to 1.12× — the matvec hits memory bandwidth limits, so Mojo and NumPy's BLAS converge.
+
+### Reproduce
 
 ```bash
 cd remex/mojo
 mojo build -I . polarquant.mojo            -o polarquant
 mojo build -I . bench/bench_encode.mojo    -o bench/bench_encode
 mojo build -I . bench/bench_search.mojo    -o bench/bench_search
-python bench/compare.py --n 10000 --d 384 --bits 4 --queries 50 --k 10
+mojo build -I . bench/bench_twostage.mojo  -o bench/bench_twostage
+python bench/compare.py --n 10000 --d 384 --bits 4 --queries 100 --k 10
 ```
 
 ## Reproducibility
