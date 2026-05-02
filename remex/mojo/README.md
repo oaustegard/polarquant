@@ -25,6 +25,7 @@ remex/mojo/
 │   ├── pq_format.mojo       # .pq binary format read/write
 │   ├── params_format.mojo   # .params dump (R + boundaries + centroids)
 │   ├── quantizer.mojo       # Quantizer struct: encode + ADC search + two-stage + decode
+│   ├── ivf.mojo             # IVFCoarseIndex: data-oblivious IVF over Matryoshka coarse tier
 │   └── gpu/                 # GPU/MAX kernels — scaffolding, see issue #42
 │       ├── device.mojo      # is_gpu_available() probe
 │       ├── encode.mojo      # gpu_encode_batch (stub)
@@ -38,12 +39,15 @@ remex/mojo/
 │   ├── test_encode.mojo            # bit-identical encode parity vs Python
 │   ├── test_decode.mojo            # decode parity vs Python (full + coarse precision)
 │   ├── test_search_twostage.mojo   # top-k parity for search_twostage vs Python
+│   ├── test_ivf.mojo               # IVFCoarseIndex parity vs Python (cell IDs + search)
+│   ├── build_ivf_fixture.py        # Python fixture builder for test_ivf.mojo
 │   ├── test_gpu_encode.mojo        # encode parity for --device gpu (skipped without GPU)
 │   └── test_gpu_search.mojo        # ADC parity vs CPU for --device gpu (skipped without GPU)
 └── bench/
     ├── bench_encode.mojo
     ├── bench_search.mojo
     ├── bench_twostage.mojo
+    ├── bench_ivf.mojo              # IVF two-stage latency at varying nprobe
     ├── bench_gpu_encode.mojo       # GPU encode timing (skipped without GPU)
     ├── bench_gpu_search.mojo       # GPU ADC timing (skipped without GPU)
     └── compare.py           # Mojo vs NumPy comparison driver
@@ -66,6 +70,7 @@ mojo build -I . polarquant.mojo            -o polarquant
 mojo build -I . bench/bench_encode.mojo    -o bench/bench_encode
 mojo build -I . bench/bench_search.mojo    -o bench/bench_search
 mojo build -I . bench/bench_twostage.mojo  -o bench/bench_twostage
+mojo build -I . bench/bench_ivf.mojo       -o bench/bench_ivf
 ```
 
 ## CLI usage
@@ -249,6 +254,10 @@ np.save('/tmp/_twostage_expected_idx.npy', expected_idx)
 np.save('/tmp/_twostage_expected_scores.npy', expected_scores)
 "
 mojo run -I . tests/test_search_twostage.mojo
+
+# IVFCoarseIndex parity (cell IDs in both modes + search at full nprobe):
+python remex/mojo/tests/build_ivf_fixture.py
+mojo run -I . tests/test_ivf.mojo
 ```
 
 ## Benchmarks
@@ -256,6 +265,10 @@ mojo run -I . tests/test_search_twostage.mojo
 ```bash
 cd remex/mojo
 python bench/compare.py --n 10000 --d 384 --bits 4 --queries 100 --k 10
+
+# IVF latency at varying nprobe (auto doubling sweep up to n_cells).
+./bench/bench_ivf --n 100000 --d 384 --bits 4 --queries 100 --k 10 \
+    --n-bits 8 --mode rotated_prefix --candidates 500 --coarse-precision 2
 ```
 
 See `bench/RESULTS.md` (in this PR) for current numbers.
