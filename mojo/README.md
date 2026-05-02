@@ -348,7 +348,9 @@ already works.
   O(n log k) — ~90× fewer comparisons at default n=10k, candidates=500
   (PR #51, closing issue #49). The coarse-stage inner loop itself is
   still scalar gather+arithmetic; tighter SIMD on that gather is the
-  next bottleneck (issue #50).
+  next bottleneck — landed in PR #52 (NB=8 row-block of the coarse-stage
+  ADC scoring loop). Numbers in `bench/RESULTS.md` are post-#51 but
+  pre-#52; a fresh bench run will pick up the additional speedup.
 - **GPU kernels are stubbed.** `--device gpu` is wired through the CLI,
   tests, and bench drivers, but `src/gpu/encode.mojo` and
   `src/gpu/adc.mojo` raise until the MAX implementation lands — see
