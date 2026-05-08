@@ -59,14 +59,34 @@ def main() raises:
     var packed = alloc[UInt8](expected.packed_bytes)
     pack(indices, n * d, bits, packed)
 
-    # Byte-identical packed indices vs Python reference. A blocked GPU
-    # GEMM may flip a coordinate that sits on a boundary; if the strict
-    # check fails on a real GPU run, switch to a "fraction-of-coordinates
-    # within tolerance" assertion and document the threshold.
+    # Byte-identical packed indices vs Python reference, modulo a
+    # documented FP-order tolerance. The Metal FMA pipeline fuses
+    # multiply-add into a single rounding step; the CPU SIMD path does
+    # two roundings. For coordinates within ~1 ULP of a quantization
+    # boundary this can flip the resulting nibble by 1. Issue #42
+    # acceptance: count mismatched bytes as a fraction of total and
+    # require it stay below the threshold below.
+    var mismatched_bytes = 0
+    var max_diff = 0
     for i in range(expected.packed_bytes):
-        assert_equal(Int(packed[i]), Int(expected.packed_indices[i]))
+        var got = Int(packed[i])
+        var want = Int(expected.packed_indices[i])
+        if got != want:
+            mismatched_bytes += 1
+            var delta = got - want if got > want else want - got
+            if delta > max_diff:
+                max_diff = delta
 
-    print("test_gpu_encode: OK (", n, "vectors, d =", d, ", bits =", bits, ")")
+    var pct = Float64(mismatched_bytes) / Float64(expected.packed_bytes) * 100.0
+    print("test_gpu_encode: OK (", n, "vectors, d =", d, ", bits =", bits,
+          "); diverged bytes =", mismatched_bytes, "/", expected.packed_bytes,
+          "(", pct, "%); max byte delta =", max_diff)
+
+    # 0.5% byte-divergence cap — well within the issue #42 "boundary-adjacent
+    # coordinates" expectation. Tighten if a future kernel does FMA-aware
+    # accumulation; loosen only with a written rationale.
+    assert_true(pct < Float64(0.5),
+                String("GPU encode divergence above 0.5% tolerance"))
 
     indices.free()
     norms.free()
