@@ -24,27 +24,6 @@ coordinates near a boundary may still flip due to operand-order
 differences in the FMA pipeline; the test (test_gpu_encode.mojo) starts
 with a strict byte-equal assert and is documented to fall back to a
 fraction-within-tolerance check if real silicon disagrees.
-
-## Memory access optimization
-
-The kernel receives R_T, the column-major transpose of R (stored row-major
-as R_T[j, k] = R[k, j]).  This turns what was a strided-by-d access into
-a coalesced access: adjacent threads in the x-dimension (adjacent `col`
-values) read R_T[j * d + col], which are contiguous in memory.
-
-Without transposition:
-  thread `col` reads R[col * d + j] — between adjacent threads the
-  addresses differ by d = 384 floats = 1536 bytes → 32 cache misses per
-  warp step.
-
-With R_T:
-  thread `col` reads R_T[j * d + col] — adjacent threads differ by one
-  float = 4 bytes → one cache line covers an entire 16-thread group.
-
-R_T is computed on the host once per `gpu_encode_batch` call via an O(d²)
-transpose (< 600 µs at d=384) and sent to the device in place of R.
-X reads are already broadcast-efficient (all threads in a warp share the
-same row and therefore the same X[row, j] at each j step).
 """
 
 from std.math import sqrt
@@ -57,7 +36,7 @@ from src.quantizer import Quantizer
 
 def _encode_kernel(
     X: UnsafePointer[Float32, MutAnyOrigin],
-    R_T: UnsafePointer[Float32, MutAnyOrigin],  # R transposed: R_T[j*d+k] = R[k*d+j]
+    R: UnsafePointer[Float32, MutAnyOrigin],
     inv_norms: UnsafePointer[Float32, MutAnyOrigin],
     boundaries: UnsafePointer[Float32, MutAnyOrigin],
     indices_out: UnsafePointer[UInt8, MutAnyOrigin],
@@ -75,12 +54,9 @@ def _encode_kernel(
     var di = Int(d)
 
     # Rotation matvec — left-to-right accumulation matches CPU `_dot_f32`.
-    # R_T[j * d + ci] = R[ci * d + j]: reading R_T with fixed j and varying ci
-    # (across warp threads) gives coalesced access — adjacent ci addresses
-    # differ by 4 bytes, vs 384*4 bytes for the original R[ci*d+j] layout.
     var rot: Float32 = 0.0
     for j in range(di):
-        rot += R_T[j * di + ci] * X[ri * di + j]
+        rot += R[ci * di + j] * X[ri * di + j]
     rot *= inv_norms[ri]
 
     # searchsorted_left: smallest i such that rot < boundaries[i]; else n_b.
@@ -121,19 +97,11 @@ def gpu_encode_batch(q: Quantizer,
         norms_out[i] = nm
         inv_norms[i] = Float32(1.0) / nm if nm > Float32(1e-8) else Float32(1.0 / 1e-8)
 
-    # 2. Pre-transpose R so the kernel sees coalesced R_T reads.
-    #    R_T[j, k] = R[k, j] stored row-major: R_T[j*d+k] = q.R.data[k*d+j].
-    #    O(d²) = ~148K ops at d=384; negligible vs O(n*d²) kernel work.
-    var R_T = alloc[Float32](d * d)
-    for k in range(d):
-        for j in range(d):
-            R_T[j * d + k] = q.R.data[k * d + j]
-
-    # 3. Stage to device, launch kernel, drain back.
+    # 2. Stage to device, launch kernel, drain back.
     var ctx = DeviceContext()
 
     var X_host = ctx.enqueue_create_host_buffer[DType.float32](n * d)
-    var RT_host = ctx.enqueue_create_host_buffer[DType.float32](d * d)
+    var R_host = ctx.enqueue_create_host_buffer[DType.float32](d * d)
     var inv_host = ctx.enqueue_create_host_buffer[DType.float32](n)
     var bnd_host = ctx.enqueue_create_host_buffer[DType.float32](n_b)
     ctx.synchronize()
@@ -141,20 +109,20 @@ def gpu_encode_batch(q: Quantizer,
     for i in range(n * d):
         X_host[i] = X[i]
     for i in range(d * d):
-        RT_host[i] = R_T[i]
+        R_host[i] = q.R.data[i]
     for i in range(n):
         inv_host[i] = inv_norms[i]
     for i in range(n_b):
         bnd_host[i] = q.cb.boundaries[i]
 
     var X_dev = ctx.enqueue_create_buffer[DType.float32](n * d)
-    var RT_dev = ctx.enqueue_create_buffer[DType.float32](d * d)
+    var R_dev = ctx.enqueue_create_buffer[DType.float32](d * d)
     var inv_dev = ctx.enqueue_create_buffer[DType.float32](n)
     var bnd_dev = ctx.enqueue_create_buffer[DType.float32](n_b)
     var idx_dev = ctx.enqueue_create_buffer[DType.uint8](n * d)
 
     ctx.enqueue_copy(dst_buf=X_dev, src_buf=X_host)
-    ctx.enqueue_copy(dst_buf=RT_dev, src_buf=RT_host)
+    ctx.enqueue_copy(dst_buf=R_dev, src_buf=R_host)
     ctx.enqueue_copy(dst_buf=inv_dev, src_buf=inv_host)
     ctx.enqueue_copy(dst_buf=bnd_dev, src_buf=bnd_host)
 
@@ -165,7 +133,7 @@ def gpu_encode_batch(q: Quantizer,
 
     ctx.enqueue_function[_encode_kernel, _encode_kernel](
         X_dev.unsafe_ptr(),
-        RT_dev.unsafe_ptr(),
+        R_dev.unsafe_ptr(),
         inv_dev.unsafe_ptr(),
         bnd_dev.unsafe_ptr(),
         idx_dev.unsafe_ptr(),
@@ -183,5 +151,4 @@ def gpu_encode_batch(q: Quantizer,
     for i in range(n * d):
         indices_out[i] = idx_host[i]
 
-    R_T.free()
     inv_norms.free()

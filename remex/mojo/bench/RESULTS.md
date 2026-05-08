@@ -52,42 +52,47 @@ indicative measurements (pre-#51, unaffected by it).
 | 2026-04 | [#48](https://github.com/oaustegard/remex/pull/48) | bench | Refresh; flagged twostage as weak spot | 19.0 ms (0.91×) |
 | 2026-05 | [#51](https://github.com/oaustegard/remex/pull/51) | twostage | Min-heap coarse top-k (O(n·k) → O(n log k)) | 3.18 ms (5.5×) |
 
-## GPU port (Apple M1, first cut — PR [#65](https://github.com/oaustegard/remex/pull/65))
+## GPU port (Apple M1 native, measured)
 
-**Hardware**: Apple M1 (7-core GPU, 68 GB/s unified memory), n=10000, d=384, bits=4
+**Hardware**: Apple M1 native (no container), Mojo 1.0.0b1, Xcode Metal Toolchain.
+Workload: n=10000, d=384, bits=4, seed=42, 1-trial timed after warmup.
 
 | Stage | Mojo CPU | Mojo GPU (M1 Metal) | vs CPU |
 |---|---|---|---|
-| encode (µs/vec) | 11.2 | 41.8 | 3.7× slower |
-| search (ms/q, per-call corpus H2D) | 5.6 | 10.6 | 1.9× slower |
+| encode (µs/vec) | 11.7 | 43.1 | 3.7× slower |
+| search (ms/q) | 5.74 | **4.42** | **1.30× faster** |
 
-Both GPU paths were correct but slower than the optimised CPU path.
-PR [#65](https://github.com/oaustegard/remex/pull/65) identified two root causes:
+**Search wins**: PR [#66](https://github.com/oaustegard/remex/pull/66)'s
+`GPUCorpus` stages the corpus (indices + norms, ~3.87 MB) to the device once
+and reuses it across queries. Per-query H2D drops to just the lookup table
+(~24 KB) — ~160× less transfer per query. Result: GPU search now beats CPU
+search at d=384, where before it was 1.9× slower.
 
-**Encode** — the `_encode_kernel` reads `R[col * d + j]` for each thread.
-Adjacent warp threads have different `col` values, so their R addresses
-differ by `d * 4 = 1536` bytes — one cache miss per thread per j step.
-Fix (this PR): pre-transpose R on the host → send `R_T[j * d + col]` to
-device → adjacent threads read adjacent addresses → one cache line per 16
-threads instead of 16 cache lines.
+**Encode loses**: PR [#66](https://github.com/oaustegard/remex/pull/66) also
+attempted to coalesce `R` reads across warp threads by pre-transposing R on
+the host and reading `R_T[j*d + col]`.  On Apple Metal this made encode
+*worse*: 43.1 µs/vec → 77.2 µs/vec (1.8× slowdown), reverted in PR
+[#67](https://github.com/oaustegard/remex/pull/67).
 
-**Search** — `gpu_adc_search` staged the full corpus (indices + norms,
-~3.87 MB at n=10000 d=384) to the device on every query call. Per-query
-H2D at 68 GB/s: ~57 µs corpus transfer alone. Fix (this PR): `GPUCorpus`
-stages the corpus once; `gpu_adc_search_corpus` only H2Ds the per-query
-lookup table (~24 KB) → ~160× less H2D per query.
+The transpose trades per-thread sequential reads (`R[ci*d + j]` increments
+by 1 in j) for per-thread strided reads (`R_T[j*d + ci]` strides by d).
+On NVIDIA SIMT GPUs across-warp coalescing dominates; on Apple's TBDR
+architecture the per-thread sequential pattern wins because the L1 +
+hardware prefetcher already amortises the strided across-thread cost,
+while strided per-thread reads thrash L1.  Lesson: validate GPU
+optimisations against the actual silicon — don't port NVIDIA intuition to
+Metal blind.
 
-**Expected post-PR numbers** (to be measured on a Metal host after merge):
+The `bench/RESULTS.md § Mojo port` GPU row will be populated when GPU
+numbers are competitive with a CuPy/PyTorch baseline (issue #42 acceptance
+criteria) — encode still needs work.  Avenues to investigate:
 
-| Stage | Before | After (projected) |
-|---|---|---|
-| encode (µs/vec) | 41.8 | ~10–15 (coalescing fix) |
-| search (ms/q) | 10.6 | ~0.3–1.0 (corpus cache) |
-
-The GPU encode result will be added to this table once measured.
-`bench/RESULTS.md § Mojo port` GPU row will be populated when the
-optimized numbers are competitive with a CuPy/PyTorch baseline (issue #42
-acceptance criteria).
+- One thread per row, full d-element dot in a single thread (minimises
+  R-row reuse across blocks; works because n=10k is plenty of parallelism)
+- `threadgroup` shared memory tiling — load BLOCK_X rows of R once per
+  block, all threads in the block reuse them across j
+- Vectorised per-thread loads (`SIMD[Float32, 4]`) inside the existing
+  per-thread sequential pattern
 
 ## Notes
 
