@@ -52,6 +52,43 @@ indicative measurements (pre-#51, unaffected by it).
 | 2026-04 | [#48](https://github.com/oaustegard/remex/pull/48) | bench | Refresh; flagged twostage as weak spot | 19.0 ms (0.91×) |
 | 2026-05 | [#51](https://github.com/oaustegard/remex/pull/51) | twostage | Min-heap coarse top-k (O(n·k) → O(n log k)) | 3.18 ms (5.5×) |
 
+## GPU port (Apple M1, first cut — PR [#65](https://github.com/oaustegard/remex/pull/65))
+
+**Hardware**: Apple M1 (7-core GPU, 68 GB/s unified memory), n=10000, d=384, bits=4
+
+| Stage | Mojo CPU | Mojo GPU (M1 Metal) | vs CPU |
+|---|---|---|---|
+| encode (µs/vec) | 11.2 | 41.8 | 3.7× slower |
+| search (ms/q, per-call corpus H2D) | 5.6 | 10.6 | 1.9× slower |
+
+Both GPU paths were correct but slower than the optimised CPU path.
+PR [#65](https://github.com/oaustegard/remex/pull/65) identified two root causes:
+
+**Encode** — the `_encode_kernel` reads `R[col * d + j]` for each thread.
+Adjacent warp threads have different `col` values, so their R addresses
+differ by `d * 4 = 1536` bytes — one cache miss per thread per j step.
+Fix (this PR): pre-transpose R on the host → send `R_T[j * d + col]` to
+device → adjacent threads read adjacent addresses → one cache line per 16
+threads instead of 16 cache lines.
+
+**Search** — `gpu_adc_search` staged the full corpus (indices + norms,
+~3.87 MB at n=10000 d=384) to the device on every query call. Per-query
+H2D at 68 GB/s: ~57 µs corpus transfer alone. Fix (this PR): `GPUCorpus`
+stages the corpus once; `gpu_adc_search_corpus` only H2Ds the per-query
+lookup table (~24 KB) → ~160× less H2D per query.
+
+**Expected post-PR numbers** (to be measured on a Metal host after merge):
+
+| Stage | Before | After (projected) |
+|---|---|---|
+| encode (µs/vec) | 41.8 | ~10–15 (coalescing fix) |
+| search (ms/q) | 10.6 | ~0.3–1.0 (corpus cache) |
+
+The GPU encode result will be added to this table once measured.
+`bench/RESULTS.md § Mojo port` GPU row will be populated when the
+optimized numbers are competitive with a CuPy/PyTorch baseline (issue #42
+acceptance criteria).
+
 ## Notes
 
 - **Encode** is bandwidth-limited at d=768 — the matvec hits memory bandwidth
