@@ -1,10 +1,16 @@
-"""Time `gpu_adc_search` on a synthetic compressed corpus.
+"""Time `gpu_adc_search_corpus` on a synthetic compressed corpus.
 
 Usage: bench_gpu_search --n N --d D --bits B --queries Q --k K [--seed S]
 
 Mirrors `bench_search.mojo`. Skips when no GPU is reachable. The CPU
 encode path is used to build the corpus once — only the search loop is
 timed against the GPU kernel.
+
+A `GPUCorpus` is built once (indices + norms staged to device), then
+`gpu_adc_search_corpus` is called once per query.  Only the per-query
+lookup table (~24 KB at d=384, n_levels=16) crosses the bus each call;
+the corpus (~3.87 MB) stays on device.  A warmup query is issued before
+the timed loop to drive lazy device init + first kernel JIT.
 """
 
 from std.sys import argv
@@ -16,7 +22,7 @@ from src.quantizer import Quantizer, encode_batch
 from src.rotation import haar_rotation
 from src.rng import Xoshiro256pp
 from src.gpu.device import is_gpu_available
-from src.gpu.adc import gpu_adc_search
+from src.gpu.adc import GPUCorpus, gpu_adc_search_corpus
 
 
 def _arg_idx(args: List[String], flag: String) -> Int:
@@ -74,10 +80,14 @@ def main() raises:
     var top_idx = alloc[Int](k)
     var top_scores = alloc[Float32](k)
 
+    # Build persistent device corpus (one-time H2D of indices + norms).
+    var corpus = GPUCorpus(indices, norms, n, d, q.cb.n_levels)
+
+    # Warmup: drives lazy device init + first kernel JIT.
     var qbuf0 = alloc[Float32](d)
     for j in range(d):
         qbuf0[j] = Q_buf[j]
-    gpu_adc_search(q, indices, norms, n, qbuf0, k, top_idx, top_scores)
+    gpu_adc_search_corpus(q, corpus, qbuf0, k, top_idx, top_scores)
     qbuf0.free()
 
     var t0 = perf_counter_ns()
@@ -85,12 +95,13 @@ def main() raises:
         var qbuf = alloc[Float32](d)
         for j in range(d):
             qbuf[j] = Q_buf[qi * d + j]
-        gpu_adc_search(q, indices, norms, n, qbuf, k, top_idx, top_scores)
+        gpu_adc_search_corpus(q, corpus, qbuf, k, top_idx, top_scores)
         qbuf.free()
     var t1 = perf_counter_ns()
     var dt_ns = Int(t1 - t0)
     var ms_per_q = Float64(dt_ns) / Float64(queries) / 1000000.0
     print("  search time:", dt_ns / 1000000, "ms total,", ms_per_q, "ms / query")
+    print("  (GPUCorpus path: corpus staged once, table H2D per query)")
 
     indices.free()
     norms.free()
