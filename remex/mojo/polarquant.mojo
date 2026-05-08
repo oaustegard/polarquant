@@ -23,7 +23,7 @@ from src.pq_format import save_pq, load_pq
 from src.quantizer import Quantizer, encode_batch, adc_search, search_twostage, decode_batch
 from src.packing import pack, packed_nbytes
 from src.rotation import haar_rotation, haar_rotation_numpy
-from src.gpu.device import is_gpu_available
+from src.gpu.device import is_apple_gpu, is_gpu_available
 from src.gpu.encode import gpu_encode_batch
 from src.gpu.adc import gpu_adc_search
 
@@ -66,32 +66,84 @@ def _build_quantizer(d: Int, bits: Int, seed: UInt64,
 
 def _print_usage():
     print("usage:")
-    print("  polarquant encode <input.npy> --bits N (--seed S | --params P) [--device cpu|gpu] -o <out.pq>")
-    print("  polarquant search <index.pq> <query.npy> --k K (--seed S | --params P) [--device cpu|gpu] [--top T]")
+    print("  polarquant encode <input.npy> --bits N (--seed S | --params P) [--device auto|cpu|gpu] -o <out.pq>")
+    print("  polarquant search <index.pq> <query.npy> --k K (--seed S | --params P) [--device auto|cpu|gpu] [--top T]")
     print("                   [--twostage --candidates N --coarse-precision K]")
     print("  polarquant decode <index.pq> (--seed S | --params P) [--precision P] -o <out.npy>")
+    print("")
+    print("--device defaults to 'auto', which picks the most efficient backend per stage:")
+    print("  encode: always CPU (GPU encode is currently slower on every measured platform;")
+    print("          Apple Metal is 3.7x slower at d=384, see bench/RESULTS.md).")
+    print("  search: GPU if an accelerator is present, else CPU (GPU search is faster on")
+    print("          Apple Metal via the corpus cache; non-Apple GPUs are not yet measured).")
+    print("Use --device cpu or --device gpu to force a backend (e.g. for benchmarking).")
 
 
 def _parse_device(args: List[String]) raises -> String:
-    """Parse --device flag. Returns 'cpu' (default) or 'gpu'.
+    """Parse --device flag. Returns 'auto' (default), 'cpu', or 'gpu'.
 
-    Errors if --device is given an unknown value, or if 'gpu' is requested
-    but no GPU is available (the GPU kernels are stubbed pending issue #42,
-    so `is_gpu_available()` returns False until they land).
+    The actual backend used per stage is decided by `_resolve_encode_device`
+    and `_resolve_search_device`, which apply per-stage policy when 'auto'
+    is requested. Errors only on unknown flag values; 'gpu' availability is
+    checked at resolve time so 'auto' can fall back cleanly.
     """
     var idx = _arg_idx(args, String("--device"))
     if idx < 0:
-        return String("cpu")
+        return String("auto")
     var dev = _arg_str(args, idx + 1)
-    if dev != String("cpu") and dev != String("gpu"):
-        raise Error(String("--device must be 'cpu' or 'gpu', got: ") + dev)
-    if dev == String("gpu") and not is_gpu_available():
-        raise Error(
-            "--device gpu requested but no GPU is available. "
-            "GPU kernels are not yet implemented (see issue #42). "
-            "Drop the flag (or pass --device cpu) to run on CPU."
-        )
+    if dev != String("auto") and dev != String("cpu") and dev != String("gpu"):
+        raise Error(String("--device must be 'auto', 'cpu', or 'gpu', got: ") + dev)
     return dev
+
+
+def _resolve_encode_device(requested: String) raises -> String:
+    """Pick encode backend. Honors explicit cpu/gpu; 'auto' resolves to cpu.
+
+    Auto-policy rationale: GPU encode has been measured slower than CPU on
+    every host tested (3.7x slower on Apple M1 at d=384, PR #67). NVIDIA
+    and AMD GPU encode are unmeasured; the conservative auto choice is CPU
+    until a GPU baseline lands.
+    """
+    if requested == String("cpu"):
+        return String("cpu")
+    if requested == String("gpu"):
+        if not is_gpu_available():
+            raise Error(
+                "--device gpu requested but no GPU is available. "
+                "Drop the flag (or pass --device cpu / --device auto)."
+            )
+        if is_apple_gpu():
+            print(
+                "warning: --device gpu encode on Apple Metal is ~3.7x slower than CPU "
+                "(measured at d=384, see bench/RESULTS.md). Proceeding as requested; "
+                "use --device auto for the efficient default."
+            )
+        return String("gpu")
+    # auto
+    return String("cpu")
+
+
+def _resolve_search_device(requested: String) raises -> String:
+    """Pick search backend. Honors explicit cpu/gpu; 'auto' uses GPU if available.
+
+    Auto-policy rationale: GPU search is measured 1.30x faster than CPU on
+    Apple Metal at d=384 (PR #66 corpus cache). The corpus-cache design
+    generalizes to NVIDIA/AMD; auto enables it whenever an accelerator is
+    reachable, and falls back to CPU otherwise.
+    """
+    if requested == String("cpu"):
+        return String("cpu")
+    if requested == String("gpu"):
+        if not is_gpu_available():
+            raise Error(
+                "--device gpu requested but no GPU is available. "
+                "Drop the flag (or pass --device cpu / --device auto)."
+            )
+        return String("gpu")
+    # auto
+    if is_gpu_available():
+        return String("gpu")
+    return String("cpu")
 
 
 def cmd_encode(args: List[String]) raises:
@@ -122,7 +174,8 @@ def cmd_encode(args: List[String]) raises:
         raise Error("encode: -o <out.pq> required")
     var out_path = _arg_str(args, out_idx + 1)
 
-    var device = _parse_device(args)
+    var requested_device = _parse_device(args)
+    var device = _resolve_encode_device(requested_device)
 
     var rng_idx = _arg_idx(args, String("--rng"))
     var rng_choice = String("numpy")
@@ -131,7 +184,10 @@ def cmd_encode(args: List[String]) raises:
         if rng_choice != "numpy" and rng_choice != "xoshiro":
             raise Error("encode: --rng must be 'numpy' (default) or 'xoshiro'")
 
-    print("encode:", input_path, "→", out_path, "(bits =", bits, ", device =", device, ", rng =", rng_choice, ")")
+    var device_note = String("")
+    if requested_device == String("auto"):
+        device_note = String(" [auto]")
+    print("encode:", input_path, "→", out_path, "(bits =", bits, ", device =", device + device_note, ", rng =", rng_choice, ")")
     var X = load_npy_2d_f32(input_path)
     var n = X.rows
     var d = X.cols
@@ -196,16 +252,25 @@ def cmd_search(args: List[String]) raises:
     if top_idx >= 0:
         print_top = Int(_arg_str(args, top_idx + 1))
 
-    var device = _parse_device(args)
+    var requested_device = _parse_device(args)
 
     # Two-stage mode flags
     var twostage_idx = _arg_idx(args, String("--twostage"))
     var use_twostage = twostage_idx >= 0
-    if use_twostage and device == String("gpu"):
-        raise Error(
-            "search --twostage --device gpu: not supported. "
-            "Issue #42 covers adc_search only; two-stage GPU is a follow-up."
-        )
+    # Twostage runs on CPU only — force CPU when 'auto'; reject explicit 'gpu'.
+    var device: String
+    if use_twostage:
+        if requested_device == String("gpu"):
+            raise Error(
+                "search --twostage --device gpu: not supported. "
+                "Issue #42 covers adc_search only; two-stage GPU is a follow-up. "
+                "Drop the flag (or pass --device auto / --device cpu)."
+            )
+        device = String("cpu")
+    else:
+        device = _resolve_search_device(requested_device)
+    if requested_device == String("auto"):
+        print("search: device resolved to", device, "[auto]")
     var candidates = 0
     var coarse_precision = 0
     if use_twostage:
