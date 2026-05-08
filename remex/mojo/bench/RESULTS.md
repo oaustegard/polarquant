@@ -74,6 +74,13 @@ the host and reading `R_T[j*d + col]`.  On Apple Metal this made encode
 *worse*: 43.1 µs/vec → 77.2 µs/vec (1.8× slowdown), reverted in PR
 [#67](https://github.com/oaustegard/remex/pull/67).
 
+**Default policy** (`--device auto`, the new default): encode runs on
+CPU, search runs on GPU when an accelerator is reachable. CPU encode
+beats GPU encode on every measured host today (Apple M1: 3.7× slower on
+GPU); NVIDIA/AMD encode is unmeasured, so auto stays on CPU until a
+baseline confirms otherwise. `--device cpu` and `--device gpu` are
+explicit overrides for benchmarking or for re-measuring the policy.
+
 The transpose trades per-thread sequential reads (`R[ci*d + j]` increments
 by 1 in j) for per-thread strided reads (`R_T[j*d + ci]` strides by d).
 On NVIDIA SIMT GPUs across-warp coalescing dominates; on Apple's TBDR

@@ -273,13 +273,30 @@ python bench/compare.py --n 10000 --d 384 --bits 4 --queries 100 --k 10
 
 See `bench/RESULTS.md` (in this PR) for current numbers.
 
-## GPU / MAX path (`--device gpu`)
+## GPU / MAX path (`--device auto|cpu|gpu`)
 
-**Status: scaffolding only.** The CLI flag, dispatch, test harness, and
-bench drivers are wired, but the kernels in `src/gpu/encode.mojo` and
-`src/gpu/adc.mojo` are stubs that raise `Error` until the real
-MAX-graph or kernel-launch implementation lands. Tracked by
-[issue #42](https://github.com/oaustegard/remex/issues/42).
+**Status: kernels live, auto policy steers per stage.** Encode and
+ADC-search kernels in `src/gpu/encode.mojo` and `src/gpu/adc.mojo`
+landed via PRs [#65](https://github.com/oaustegard/remex/pull/65)
+and [#66](https://github.com/oaustegard/remex/pull/66). The CLI now
+defaults to `--device auto`, which resolves per stage based on what's
+been measured:
+
+- **encode → CPU.** Mojo CPU encode is 11.7 µs/vec at d=384; Apple Metal
+  GPU is 43.1 µs/vec (3.7× slower) on the same host (PR
+  [#67](https://github.com/oaustegard/remex/pull/67)). NVIDIA/AMD encode
+  is unmeasured; auto stays on the safe path until that changes.
+- **search → GPU when an accelerator is reachable.** GPU ADC search with
+  the corpus cache is 1.30× faster than CPU on Apple Metal at d=384
+  (PR [#66](https://github.com/oaustegard/remex/pull/66)); falls back
+  to CPU when no accelerator is available.
+
+Use `--device cpu` or `--device gpu` to force a backend explicitly —
+useful for benchmarking or for non-Apple GPU hosts where the auto
+policy may be too conservative on encode. Forcing `--device gpu` for
+encode on Apple Metal still works but prints a one-line warning. See
+[issue #42](https://github.com/oaustegard/remex/issues/42) for the
+broader GPU acceptance criteria.
 
 ### Build
 
@@ -303,9 +320,13 @@ mojo build -I . bench/bench_gpu_search.mojo    -o bench/bench_gpu_search
 ### Run
 
 ```bash
-# Encode + search on GPU (errors with a clear message until kernels land).
+# Default: auto picks CPU encode, GPU search on hosts with an accelerator.
+./polarquant encode corpus.npy --bits 4 --params P.bin -o corpus.pq
+./polarquant search corpus.pq query.npy --k 10 --params P.bin --top 10
+
+# Force a backend (e.g. for benchmarking).
 ./polarquant encode corpus.npy --bits 4 --params P.bin --device gpu -o corpus.pq
-./polarquant search corpus.pq query.npy --k 10 --params P.bin --device gpu --top 10
+./polarquant search corpus.pq query.npy --k 10 --params P.bin --device cpu --top 10
 ```
 
 ### Tests
@@ -360,10 +381,12 @@ already works.
   candidate selection is O(n*candidates). Mirrors the structure of
   `adc_search` in this port. Tighter inner-loop kernels — especially
   for the coarse-stage reduction at low precision — are a follow-up.
-- **GPU kernels are stubbed.** `--device gpu` is wired through the CLI,
-  tests, and bench drivers, but `src/gpu/encode.mojo` and
-  `src/gpu/adc.mojo` raise until the MAX implementation lands — see
-  the `## GPU / MAX path` section above and issue #42.
+- **GPU kernels live; default policy is per-stage.** `--device auto`
+  (the default) routes encode to CPU and ADC search to GPU when an
+  accelerator is present. Apple Metal GPU encode is measured 3.7× slower
+  than CPU at d=384 (PR #67); NVIDIA/AMD encode is unmeasured, and the
+  auto policy stays conservative there until a baseline lands. See the
+  `## GPU / MAX path` section above and issue #42.
 - **Seed parity** with NumPy's `default_rng` is now bit-identical at
   1–4 bits via `src/rng_numpy.mojo` (PCG64 + SeedSequence + Ziggurat,
   issue #40). 8-bit byte parity is blocked by Mojo `std.math.erf`
